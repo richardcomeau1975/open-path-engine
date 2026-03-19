@@ -1,8 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException
+import uuid
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from typing import List, Optional
 from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
+from app.services.r2 import get_r2_client
+from app.config import settings
 
 router = APIRouter(prefix="/api", tags=["topics"])
+
+ALLOWED_EXTENSIONS = {".pdf", ".pptx", ".docx", ".xlsx", ".txt", ".md"}
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 
 @router.get("/courses/{course_id}/topics")
@@ -47,7 +54,6 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
 
     for feature in features:
         feature["state"] = progress_map.get(feature["key"], "not_available")
-        # In Phase 0, nothing is generated yet
         if topic_data.get("generation_status") != "complete":
             feature["state"] = "not_available"
 
@@ -60,4 +66,83 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
             "course_id": topic_data["course_id"],
         },
         "features": features,
+    }
+
+
+@router.post("/topics")
+async def create_topic_with_upload(
+    course_id: str = Form(...),
+    name: str = Form(...),
+    week_number: Optional[int] = Form(None),
+    files: List[UploadFile] = File(...),
+    student: dict = Depends(get_current_student),
+):
+    sb = get_supabase()
+
+    # Verify the course belongs to this student
+    course = sb.table("courses").select("id").eq("id", course_id).eq("student_id", student["id"]).execute()
+    if not course.data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Validate files
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Maximum 10 files allowed")
+
+    for f in files:
+        # Check extension
+        filename = f.filename or ""
+        ext = ""
+        if "." in filename:
+            ext = "." + filename.rsplit(".", 1)[1].lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed: {filename}. Accepted: PDF, PPTX, DOCX, XLSX, TXT, MD",
+            )
+
+    # Create topic row
+    topic_id = str(uuid.uuid4())
+    r2_prefix = f"{student['id']}/{course_id}/{topic_id}/uploads"
+
+    topic_result = sb.table("topics").insert({
+        "id": topic_id,
+        "course_id": course_id,
+        "name": name.strip(),
+        "week_number": week_number,
+        "generation_status": "none",
+        "r2_prefix": r2_prefix,
+    }).execute()
+
+    if not topic_result.data:
+        raise HTTPException(status_code=500, detail="Failed to create topic")
+
+    # Upload files to R2
+    r2 = get_r2_client()
+    uploaded_files = []
+
+    for f in files:
+        file_content = await f.read()
+
+        # Check file size
+        if len(file_content) > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail=f"File too large: {f.filename}. Maximum 50MB.")
+
+        r2_key = f"{r2_prefix}/{f.filename}"
+
+        r2.put_object(
+            Bucket=settings.R2_BUCKET_NAME,
+            Key=r2_key,
+            Body=file_content,
+            ContentType=f.content_type or "application/octet-stream",
+        )
+
+        uploaded_files.append({
+            "filename": f.filename,
+            "r2_key": r2_key,
+            "size": len(file_content),
+        })
+
+    return {
+        "topic": topic_result.data[0],
+        "uploaded_files": uploaded_files,
     }
