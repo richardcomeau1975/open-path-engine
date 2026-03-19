@@ -145,6 +145,13 @@ async def create_course(request: Request):
     return result.data[0]
 
 
+@router.get("/courses", dependencies=[Depends(require_admin)])
+async def list_courses():
+    sb = get_supabase()
+    result = sb.table("courses").select("*, students(name, email)").order("created_at", desc=True).execute()
+    return result.data
+
+
 # ── Prompts ───────────────────────────────────────────
 
 @router.get("/prompts", dependencies=[Depends(require_admin)])
