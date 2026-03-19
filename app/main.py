@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.routers.students import router as students_router
+from app.routers.webhooks import router as webhooks_router
 
 app = FastAPI(title="Open Path Engine", version="0.1.0")
 
@@ -18,6 +19,7 @@ if origins:
 
 # Routers
 app.include_router(students_router)
+app.include_router(webhooks_router)
 
 
 @app.get("/api/health")
