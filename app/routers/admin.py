@@ -20,6 +20,8 @@ def require_admin(request: Request):
     return True
 
 
+# ── Auth ──────────────────────────────────────────────
+
 @router.post("/login")
 async def admin_login(request: Request):
     body = await request.json()
@@ -30,6 +32,8 @@ async def admin_login(request: Request):
     _admin_tokens.add(token)
     return {"token": token}
 
+
+# ── Students ──────────────────────────────────────────
 
 @router.get("/students", dependencies=[Depends(require_admin)])
 async def list_students():
@@ -71,9 +75,8 @@ async def create_student(request: Request):
     if email:
         clerk_payload["email_address"] = [email]
     if phone:
-        # Ensure phone has + prefix for E.164 format
         if not phone.startswith("+"):
-            phone = f"+1{phone}"  # Default to US/Canada
+            phone = f"+1{phone}"
         clerk_payload["phone_number"] = [phone]
 
     try:
@@ -97,7 +100,6 @@ async def create_student(request: Request):
     except httpx.RequestError as e:
         raise HTTPException(status_code=502, detail=f"Failed to reach Clerk: {str(e)}")
 
-    # Create student in Supabase with clerk_id
     student_data = {
         "clerk_id": clerk_id,
         "name": name,
@@ -110,6 +112,8 @@ async def create_student(request: Request):
 
     return result.data[0]
 
+
+# ── Courses ───────────────────────────────────────────
 
 @router.post("/courses", dependencies=[Depends(require_admin)])
 async def create_course(request: Request):
@@ -125,7 +129,6 @@ async def create_course(request: Request):
 
     sb = get_supabase()
 
-    # Verify student exists
     student = sb.table("students").select("id").eq("id", student_id).execute()
     if not student.data:
         raise HTTPException(status_code=404, detail="Student not found")
@@ -140,3 +143,191 @@ async def create_course(request: Request):
         raise HTTPException(status_code=500, detail="Failed to create course")
 
     return result.data[0]
+
+
+# ── Prompts ───────────────────────────────────────────
+
+@router.get("/prompts", dependencies=[Depends(require_admin)])
+async def list_prompts(feature: str = None, framework_type: str = None, include_inactive: bool = False):
+    sb = get_supabase()
+    query = sb.table("base_prompts").select("*")
+
+    if not include_inactive:
+        query = query.eq("is_active", True)
+    if feature:
+        query = query.eq("feature", feature)
+    if framework_type:
+        query = query.eq("framework_type", framework_type)
+
+    result = query.order("feature").order("version", desc=True).execute()
+    return result.data
+
+
+@router.post("/prompts", dependencies=[Depends(require_admin)])
+async def create_prompt(request: Request):
+    body = await request.json()
+    feature = body.get("feature", "").strip()
+    content = body.get("content", "").strip()
+    framework_type = body.get("framework_type", "").strip() or None
+
+    if not feature:
+        raise HTTPException(status_code=400, detail="feature is required")
+    if not content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    sb = get_supabase()
+
+    # Check for existing active prompt with same feature + framework_type
+    existing_query = sb.table("base_prompts").select("version").eq("feature", feature).eq("is_active", True)
+    if framework_type:
+        existing_query = existing_query.eq("framework_type", framework_type)
+    else:
+        existing_query = existing_query.is_("framework_type", "null")
+    existing = existing_query.order("version", desc=True).limit(1).execute()
+
+    next_version = 1
+    if existing.data:
+        next_version = existing.data[0]["version"] + 1
+
+    result = sb.table("base_prompts").insert({
+        "feature": feature,
+        "framework_type": framework_type,
+        "content": content,
+        "version": next_version,
+        "is_active": True,
+        "created_by": "admin",
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to create prompt")
+
+    return result.data[0]
+
+
+@router.put("/prompts/{prompt_id}", dependencies=[Depends(require_admin)])
+async def edit_prompt(prompt_id: str, request: Request):
+    body = await request.json()
+    new_content = body.get("content", "").strip()
+
+    if not new_content:
+        raise HTTPException(status_code=400, detail="content is required")
+
+    sb = get_supabase()
+
+    # Get the current prompt
+    current = sb.table("base_prompts").select("*").eq("id", prompt_id).execute()
+    if not current.data:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    old_prompt = current.data[0]
+
+    # Deactivate the old version
+    sb.table("base_prompts").update({"is_active": False}).eq("id", prompt_id).execute()
+
+    # Create new version
+    result = sb.table("base_prompts").insert({
+        "feature": old_prompt["feature"],
+        "framework_type": old_prompt["framework_type"],
+        "content": new_content,
+        "version": old_prompt["version"] + 1,
+        "is_active": True,
+        "created_by": "admin",
+    }).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=500, detail="Failed to create new version")
+
+    return result.data[0]
+
+
+@router.get("/prompts/{prompt_id}/history", dependencies=[Depends(require_admin)])
+async def prompt_history(prompt_id: str):
+    sb = get_supabase()
+
+    # Get this prompt to find its feature + framework_type
+    current = sb.table("base_prompts").select("feature, framework_type").eq("id", prompt_id).execute()
+    if not current.data:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    prompt = current.data[0]
+
+    # Get all versions for this feature + framework_type
+    query = sb.table("base_prompts").select("*").eq("feature", prompt["feature"])
+    if prompt["framework_type"]:
+        query = query.eq("framework_type", prompt["framework_type"])
+    else:
+        query = query.is_("framework_type", "null")
+
+    result = query.order("version", desc=True).execute()
+    return result.data
+
+
+@router.post("/prompts/{prompt_id}/rollback", dependencies=[Depends(require_admin)])
+async def rollback_prompt(prompt_id: str):
+    sb = get_supabase()
+
+    # Get the prompt to rollback to
+    target = sb.table("base_prompts").select("*").eq("id", prompt_id).execute()
+    if not target.data:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+
+    target_prompt = target.data[0]
+
+    # Deactivate all active versions for this feature + framework_type
+    deactivate_query = sb.table("base_prompts").select("id").eq("feature", target_prompt["feature"]).eq("is_active", True)
+    if target_prompt["framework_type"]:
+        deactivate_query = deactivate_query.eq("framework_type", target_prompt["framework_type"])
+    else:
+        deactivate_query = deactivate_query.is_("framework_type", "null")
+
+    active_prompts = deactivate_query.execute()
+    for p in active_prompts.data:
+        sb.table("base_prompts").update({"is_active": False}).eq("id", p["id"]).execute()
+
+    # Activate the target version
+    sb.table("base_prompts").update({"is_active": True}).eq("id", prompt_id).execute()
+
+    return {"status": "rolled_back", "active_version": target_prompt["version"]}
+
+
+@router.post("/prompts/global-replace", dependencies=[Depends(require_admin)])
+async def global_replace(request: Request):
+    body = await request.json()
+    find_text = body.get("find", "")
+    replace_text = body.get("replace", "")
+
+    if not find_text:
+        raise HTTPException(status_code=400, detail="find text is required")
+
+    sb = get_supabase()
+
+    # Get all active prompts
+    active = sb.table("base_prompts").select("*").eq("is_active", True).execute()
+
+    updated = []
+    for prompt in active.data:
+        if find_text in prompt["content"]:
+            new_content = prompt["content"].replace(find_text, replace_text)
+
+            # Deactivate old version
+            sb.table("base_prompts").update({"is_active": False}).eq("id", prompt["id"]).execute()
+
+            # Create new version
+            result = sb.table("base_prompts").insert({
+                "feature": prompt["feature"],
+                "framework_type": prompt["framework_type"],
+                "content": new_content,
+                "version": prompt["version"] + 1,
+                "is_active": True,
+                "created_by": "admin",
+            }).execute()
+
+            if result.data:
+                updated.append({
+                    "feature": prompt["feature"],
+                    "framework_type": prompt["framework_type"],
+                    "old_version": prompt["version"],
+                    "new_version": prompt["version"] + 1,
+                })
+
+    return {"updated": updated, "count": len(updated)}
