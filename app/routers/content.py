@@ -184,3 +184,31 @@ async def save_notechart_answers(
         saved_count += 1
 
     return {"saved": saved_count}
+
+
+@router.get("/api/topics/{topic_id}/quiz")
+async def get_quiz(topic_id: str, request: Request):
+    """
+    Return quiz questions for a topic.
+    Generates on first request, caches on R2 for subsequent requests.
+    """
+    from app.services.generators.quiz import generate_quiz
+
+    supabase = get_supabase()
+
+    # Verify topic exists and has a learning asset
+    topic_result = supabase.table("topics").select(
+        "id, learning_asset_url"
+    ).eq("id", topic_id).execute()
+
+    if not topic_result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    if not topic_result.data[0].get("learning_asset_url"):
+        raise HTTPException(status_code=404, detail="No learning asset generated yet")
+
+    try:
+        questions = await generate_quiz(topic_id, supabase)
+        return {"questions": questions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")

@@ -60,7 +60,7 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
         "walkthrough": bool(topic_data.get("learning_asset_url")),
         "note_chart": bool(topic_data.get("notechart_url")),
         "how_tested": False,
-        "test_me": False,
+        "test_me": bool(topic_data.get("learning_asset_url")),
     }
 
     for feature in features:
@@ -105,7 +105,7 @@ async def get_topic_status(topic_id: str, student: dict = Depends(get_current_st
         "walkthrough": bool(topic.get("learning_asset_url")),
         "notechart": bool(topic.get("notechart_url")),
         "how_tested": False,  # Requires exam upload — Phase 2
-        "test_me": False,     # Requires testing profile — Phase 2
+        "test_me": bool(topic_data.get("learning_asset_url")),     # Requires testing profile — Phase 2
     }
 
     return {
