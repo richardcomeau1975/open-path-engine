@@ -90,7 +90,11 @@ async def presign_single(key: str, request: Request):
 
 
 @router.get("/api/topics/{topic_id}/notechart/questions")
-async def get_notechart_questions(topic_id: str, request: Request):
+async def get_notechart_questions(
+    topic_id: str,
+    request: Request,
+    student: dict = Depends(get_current_student),
+):
     """
     Return the note chart questions and any saved answers for the current student.
     Questions come from the generated notechart JSON on R2.
@@ -124,35 +128,13 @@ async def get_notechart_questions(topic_id: str, request: Request):
     except json.JSONDecodeError:
         questions = [{"section": "Questions", "question": clean}]
 
-    # Try to get student ID for saved answers (no auth required for questions)
-    student_id = None
-    try:
-        from app.middleware.clerk_auth import get_current_clerk_user_id
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            token = auth_header.split(" ", 1)[1]
-            import jwt
-            from app.config import settings
-            import httpx
-            jwks_url = settings.CLERK_JWKS_URL
-            resp = httpx.get(jwks_url)
-            jwks = resp.json()
-            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwks["keys"][0])
-            payload = jwt.decode(token, public_key, algorithms=["RS256"])
-            clerk_user_id = payload.get("sub")
-            if clerk_user_id:
-                student_result = supabase.table("students").select("id").eq("clerk_id", clerk_user_id).limit(1).execute()
-                if student_result.data:
-                    student_id = student_result.data[0]["id"]
-    except Exception:
-        pass
-
+    # Get saved answers for this student
+    student_id = student["id"]
     saved_answers = {}
-    if student_id:
-        answers_result = supabase.table("note_chart_answers").select(
-            "question, answer"
-        ).eq("topic_id", topic_id).eq("student_id", student_id).execute()
-        saved_answers = {a["question"]: a["answer"] for a in answers_result.data}
+    answers_result = supabase.table("note_chart_answers").select(
+        "question, answer"
+    ).eq("topic_id", topic_id).eq("student_id", student_id).execute()
+    saved_answers = {a["question"]: a["answer"] for a in answers_result.data}
 
     # Merge answers into questions
     for q in questions:
