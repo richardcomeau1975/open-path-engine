@@ -4,10 +4,13 @@ Generates presigned URLs for R2-stored content so the browser can load it direct
 """
 
 import json
+import anthropic
 from fastapi import APIRouter, Depends, HTTPException, Request
+from app.config import settings
 from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
-from app.services.r2 import download_from_r2, generate_presigned_url, generate_presigned_urls
+from app.services.file_parser import parse_file
+from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2, generate_presigned_url, generate_presigned_urls
 
 router = APIRouter()
 
@@ -212,3 +215,124 @@ async def get_quiz(topic_id: str, request: Request):
         return {"questions": questions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
+
+
+@router.post("/api/topics/{topic_id}/exam/upload")
+async def upload_exam(
+    topic_id: str,
+    request: Request,
+    student: dict = Depends(get_current_student),
+):
+    """
+    Upload a sample exam, analyze it with Sonnet, store the analysis.
+    Accepts file upload (PDF, DOCX, PNG, JPG, TXT).
+    """
+    supabase = get_supabase()
+
+    # Verify topic exists
+    topic_result = supabase.table("topics").select("id, course_id").eq("id", topic_id).execute()
+    if not topic_result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    # Get the uploaded file
+    form = await request.form()
+    file = form.get("file")
+    if not file:
+        raise HTTPException(status_code=400, detail="No file uploaded")
+
+    filename = file.filename
+    file_bytes = await file.read()
+
+    # Store the original exam on R2
+    exam_key = f"{topic_id}/exam/{filename}"
+    upload_bytes_to_r2(exam_key, file_bytes, content_type=file.content_type or "application/octet-stream")
+
+    # Parse text from the exam
+    try:
+        exam_text = parse_file(filename, file_bytes)
+    except ValueError:
+        exam_text = f"[Uploaded image file: {filename} — {len(file_bytes)} bytes. Unable to extract text from image.]"
+
+    # Load exam analysis prompt
+    prompt_result = supabase.table("base_prompts").select(
+        "id, content"
+    ).eq("feature", "exam_analysis").eq("is_active", True).limit(1).execute()
+
+    if not prompt_result.data:
+        raise HTTPException(status_code=500, detail="No active exam analysis prompt found")
+
+    base_prompt = prompt_result.data[0]["content"]
+
+    # Call Sonnet with streaming
+    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+    analysis_text = ""
+    with client.messages.stream(
+        model="claude-sonnet-4-20250514",
+        max_tokens=8000,
+        messages=[{
+            "role": "user",
+            "content": f"{base_prompt}\n\n---\n\nSAMPLE EXAM CONTENT:\n\n{exam_text}"
+        }]
+    ) as stream:
+        for text in stream.text_stream:
+            analysis_text += text
+
+    # Store analysis on R2
+    analysis_key = f"{topic_id}/exam_analysis.md"
+    upload_text_to_r2(analysis_key, analysis_text)
+
+    # Upsert modifier
+    student_id = student["id"]
+    course_id = topic_result.data[0].get("course_id")
+
+    if course_id:
+        existing = supabase.table("modifiers").select("id").eq(
+            "student_id", student_id
+        ).eq("course_id", course_id).eq("modifier_type", "testing_profile").limit(1).execute()
+
+        if existing.data:
+            supabase.table("modifiers").update({
+                "content": analysis_text,
+            }).eq("id", existing.data[0]["id"]).execute()
+        else:
+            supabase.table("modifiers").insert({
+                "student_id": student_id,
+                "course_id": course_id,
+                "topic_id": topic_id,
+                "modifier_type": "testing_profile",
+                "content": analysis_text,
+            }).execute()
+
+    return {
+        "analysis": analysis_text,
+        "exam_file": exam_key,
+        "analysis_file": analysis_key,
+    }
+
+
+@router.get("/api/topics/{topic_id}/exam/analysis")
+async def get_exam_analysis(topic_id: str, request: Request):
+    """Return stored exam analysis if it exists."""
+    analysis_key = f"{topic_id}/exam_analysis.md"
+
+    try:
+        analysis = download_from_r2(analysis_key).decode("utf-8")
+        return {"analysis": analysis, "exists": True}
+    except Exception:
+        return {"analysis": None, "exists": False}
+
+
+@router.get("/api/topics/{topic_id}/learning-asset")
+async def get_learning_asset(topic_id: str, request: Request):
+    """Return the learning asset text."""
+    supabase = get_supabase()
+    topic_result = supabase.table("topics").select("id, learning_asset_url").eq("id", topic_id).execute()
+    if not topic_result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic = topic_result.data[0]
+    if not topic.get("learning_asset_url"):
+        raise HTTPException(status_code=404, detail="No learning asset generated yet")
+
+    text = download_from_r2(topic["learning_asset_url"]).decode("utf-8")
+    return {"text": text}
