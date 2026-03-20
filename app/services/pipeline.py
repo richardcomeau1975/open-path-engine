@@ -15,6 +15,7 @@ from app.services.generators.podcast_script import generate_podcast_script as ge
 from app.services.generators.notechart import generate_notechart as gen_notechart
 from app.services.generators.visual_overview import generate_visual_overview_script as gen_visual_overview
 from app.services.generators.images import generate_images as gen_images
+from app.services.generators.podcast_audio import generate_podcast_audio as gen_podcast_audio
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,10 @@ async def run_pipeline(topic_id: str, supabase_client):
                 await gen_visual_overview(topic_id, supabase_client)
             elif step_name == "generate_images":
                 await gen_images(topic_id, supabase_client)
+            elif step_name == "generate_podcast_audio":
+                await gen_podcast_audio(topic_id, supabase_client)
             else:
-                # Placeholder for remaining steps (audio)
+                # Placeholder for remaining step (visual overview audio)
                 logger.info(f"Pipeline [{topic_id}] — {step_name}: PLACEHOLDER (not yet implemented)")
                 await asyncio.sleep(0.5)
 
