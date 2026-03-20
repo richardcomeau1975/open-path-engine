@@ -47,10 +47,11 @@ async def generate_learning_asset(topic_id: str, supabase_client) -> str:
     base_prompt = prompt_result.data[0]["content"]
     logger.info(f"Learning asset [{topic_id}] — loaded base prompt ({len(base_prompt)} chars)")
 
-    # 4. Call Opus
+    # 4. Call Opus (streaming to avoid timeout on long requests)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-    message = client.messages.create(
+    chunks = []
+    with client.messages.stream(
         model=MODEL,
         max_tokens=MAX_TOKENS,
         messages=[
@@ -59,9 +60,11 @@ async def generate_learning_asset(topic_id: str, supabase_client) -> str:
                 "content": f"{base_prompt}\n\n---\n\nSOURCE MATERIAL:\n\n{parsed_text}"
             }
         ]
-    )
+    ) as stream:
+        for text in stream.text_stream:
+            chunks.append(text)
 
-    learning_asset_text = message.content[0].text
+    learning_asset_text = "".join(chunks)
     logger.info(f"Learning asset [{topic_id}] — Opus returned {len(learning_asset_text)} chars")
 
     # 5. Store on R2
