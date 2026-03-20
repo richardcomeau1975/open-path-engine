@@ -105,7 +105,7 @@ async def get_topic_status(topic_id: str, student: dict = Depends(get_current_st
         "walkthrough": bool(topic.get("learning_asset_url")),
         "notechart": bool(topic.get("notechart_url")),
         "how_tested": True,  # Requires exam upload — Phase 2
-        "test_me": bool(topic_data.get("learning_asset_url")),     # Requires testing profile — Phase 2
+        "test_me": bool(topic.get("learning_asset_url")),     # Requires testing profile — Phase 2
     }
 
     return {
