@@ -149,7 +149,7 @@ async def create_topic_with_upload(
     # Parse uploaded files and store concatenated text on R2
     parsed_text = parse_multiple_files(file_pairs)
     parsed_text_key = f"{topic_id}/parsed_text.txt"
-    upload_text_to_r2(r2, parsed_text_key, parsed_text)
+    upload_text_to_r2(parsed_text_key, parsed_text)
 
     # Update topic with parsed text URL
     sb.table("topics").update({

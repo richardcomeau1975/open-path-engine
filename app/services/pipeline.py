@@ -10,6 +10,8 @@ import traceback
 from datetime import datetime, timezone
 from uuid import UUID
 
+from app.services.generators.learning_asset import generate_learning_asset as gen_learning_asset
+
 logger = logging.getLogger(__name__)
 
 # Step definitions — order matters
@@ -60,9 +62,10 @@ async def run_pipeline(topic_id: str, supabase_client):
             # Run the step (skip parse_files — already done during upload)
             if step_name == "parse_files":
                 logger.info(f"Pipeline [{topic_id}] — parse_files: already done during upload, skipping")
+            elif step_name == "generate_learning_asset":
+                await gen_learning_asset(topic_id, supabase_client)
             else:
-                # Placeholder — just sleep briefly to simulate work
-                # Real generators will be wired in Tasks 5-9
+                # Placeholder for remaining steps
                 logger.info(f"Pipeline [{topic_id}] — {step_name}: PLACEHOLDER (not yet implemented)")
                 await asyncio.sleep(0.5)
 

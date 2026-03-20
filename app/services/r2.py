@@ -12,12 +12,20 @@ def get_r2_client():
     )
 
 
-def upload_text_to_r2(r2_client, key: str, text: str) -> str:
+def upload_text_to_r2(key: str, text: str) -> str:
     """Upload a text string to R2. Returns the R2 key."""
-    r2_client.put_object(
+    r2 = get_r2_client()
+    r2.put_object(
         Bucket=settings.R2_BUCKET_NAME,
         Key=key,
         Body=text.encode("utf-8"),
         ContentType="text/plain",
     )
     return key
+
+
+def download_from_r2(key: str) -> bytes:
+    """Download a file from R2 and return its bytes."""
+    r2 = get_r2_client()
+    response = r2.get_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+    return response["Body"].read()

@@ -1,0 +1,77 @@
+"""
+Learning asset generator.
+Uses Claude Opus to generate a learning asset from parsed course materials.
+"""
+
+import logging
+import anthropic
+from app.config import settings
+from app.services.r2 import download_from_r2, upload_text_to_r2
+
+logger = logging.getLogger(__name__)
+
+MODEL = "claude-opus-4-20250514"
+MAX_TOKENS = 16000
+
+
+async def generate_learning_asset(topic_id: str, supabase_client) -> str:
+    """
+    Generate a learning asset for a topic.
+
+    1. Download parsed text from R2
+    2. Load base prompt from base_prompts table (feature = 'learning_asset_generator')
+    3. Call Opus
+    4. Store result on R2
+    5. Update topic row with URL
+
+    Returns the R2 key of the stored learning asset.
+    """
+    # 1. Get topic info
+    topic_result = supabase_client.table("topics").select(
+        "id, parsed_text_url, course_id"
+    ).eq("id", topic_id).execute()
+    topic = topic_result.data[0]
+
+    # 2. Download parsed text from R2
+    parsed_text = download_from_r2(topic["parsed_text_url"]).decode("utf-8")
+    logger.info(f"Learning asset [{topic_id}] — loaded parsed text ({len(parsed_text)} chars)")
+
+    # 3. Load base prompt from Supabase
+    prompt_result = supabase_client.table("base_prompts").select(
+        "id, content"
+    ).eq("feature", "learning_asset_generator").eq("is_active", True).limit(1).execute()
+
+    if not prompt_result.data:
+        raise ValueError("No active prompt found for feature 'learning_asset_generator'. Add one in the admin panel.")
+
+    base_prompt = prompt_result.data[0]["content"]
+    logger.info(f"Learning asset [{topic_id}] — loaded base prompt ({len(base_prompt)} chars)")
+
+    # 4. Call Opus
+    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+    message = client.messages.create(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        messages=[
+            {
+                "role": "user",
+                "content": f"{base_prompt}\n\n---\n\nSOURCE MATERIAL:\n\n{parsed_text}"
+            }
+        ]
+    )
+
+    learning_asset_text = message.content[0].text
+    logger.info(f"Learning asset [{topic_id}] — Opus returned {len(learning_asset_text)} chars")
+
+    # 5. Store on R2
+    r2_key = f"{topic_id}/learning_asset.md"
+    upload_text_to_r2(r2_key, learning_asset_text)
+    logger.info(f"Learning asset [{topic_id}] — stored on R2 at {r2_key}")
+
+    # 6. Update topic row
+    supabase_client.table("topics").update({
+        "learning_asset_url": r2_key
+    }).eq("id", topic_id).execute()
+
+    return r2_key
