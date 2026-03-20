@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from typing import List, Optional
 from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
-from app.services.r2 import get_r2_client
+from app.services.r2 import get_r2_client, upload_text_to_r2
+from app.services.file_parser import parse_multiple_files
 from app.config import settings
 
 router = APIRouter(prefix="/api", tags=["topics"])
@@ -119,6 +120,7 @@ async def create_topic_with_upload(
     # Upload files to R2
     r2 = get_r2_client()
     uploaded_files = []
+    file_pairs = []  # (filename, bytes) for parsing
 
     for f in files:
         file_content = await f.read()
@@ -141,6 +143,18 @@ async def create_topic_with_upload(
             "r2_key": r2_key,
             "size": len(file_content),
         })
+
+        file_pairs.append((f.filename, file_content))
+
+    # Parse uploaded files and store concatenated text on R2
+    parsed_text = parse_multiple_files(file_pairs)
+    parsed_text_key = f"{topic_id}/parsed_text.txt"
+    upload_text_to_r2(r2, parsed_text_key, parsed_text)
+
+    # Update topic with parsed text URL
+    sb.table("topics").update({
+        "parsed_text_url": parsed_text_key,
+    }).eq("id", topic_id).execute()
 
     return {
         "topic": topic_result.data[0],
