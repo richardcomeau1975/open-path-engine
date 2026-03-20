@@ -159,6 +159,39 @@ async def archive_course(course_id: str):
     return {"status": "archived"}
 
 
+@router.put("/courses/{course_id}", dependencies=[Depends(require_admin)])
+async def update_course(course_id: str, request: Request):
+    body = await request.json()
+    updates = {}
+    if "framework_type" in body:
+        updates["framework_type"] = body["framework_type"]
+    if "name" in body:
+        updates["name"] = body["name"]
+    if not updates:
+        raise HTTPException(400, "No fields to update")
+
+    sb = get_supabase()
+    result = sb.table("courses").update(updates).eq("id", course_id).execute()
+    return {"course": result.data[0] if result.data else None}
+
+
+@router.get("/framework-types", dependencies=[Depends(require_admin)])
+async def list_framework_types():
+    sb = get_supabase()
+    prompts = sb.table("base_prompts").select("framework_type").eq("is_active", True).not_.is_("framework_type", "null").execute()
+    courses = sb.table("courses").select("framework_type").not_.is_("framework_type", "null").execute()
+
+    types = set()
+    for p in prompts.data:
+        if p["framework_type"]:
+            types.add(p["framework_type"])
+    for c in courses.data:
+        if c["framework_type"]:
+            types.add(c["framework_type"])
+
+    return {"framework_types": sorted(list(types))}
+
+
 # ── Topics (admin view) ──────────────────────────────
 
 @router.get("/courses/{course_id}/topics", dependencies=[Depends(require_admin)])
@@ -171,11 +204,21 @@ async def list_course_topics(course_id: str):
 # ── Modifiers ─────────────────────────────────────────
 
 MODIFIER_TYPES = [
-    {"type": "testing_profile", "scope": "course", "label": "Testing Profile", "description": "How this student gets tested in this course"},
-    {"type": "engagement_profile", "scope": "course", "label": "Engagement Profile", "description": "What hooks this student in this material"},
-    {"type": "note_profile", "scope": "course", "label": "Note Profile", "description": "How this student takes notes"},
-    {"type": "syllabus_context", "scope": "course", "label": "Syllabus Context", "description": "Extracted from syllabus upload"},
-    {"type": "learning_preferences", "scope": "student", "label": "Learning Preferences", "description": "Global learning style preferences"},
+    {
+        "key": "admin",
+        "label": "Admin Modifier",
+        "description": "System-level tuning and adjustments. Filled by admin."
+    },
+    {
+        "key": "student_context",
+        "label": "Student Context",
+        "description": "Course-specific info from student uploads (syllabus, testing profile). Filled agentically or by admin for beta."
+    },
+    {
+        "key": "student_preference",
+        "label": "Student Preference",
+        "description": "Personal interests and background. From questionnaire or chat. Makes material land."
+    }
 ]
 
 
@@ -185,13 +228,19 @@ async def get_modifier_types():
 
 
 @router.get("/modifiers", dependencies=[Depends(require_admin)])
-async def list_modifiers(student_id: str = None, course_id: str = None):
+async def list_modifiers(student_id: str = None, course_id: str = None, topic_id: str = None, modifier_type: str = None, feature: str = None):
     sb = get_supabase()
     query = sb.table("modifiers").select("*")
     if student_id:
         query = query.eq("student_id", student_id)
     if course_id:
         query = query.eq("course_id", course_id)
+    if topic_id:
+        query = query.eq("topic_id", topic_id)
+    if modifier_type:
+        query = query.eq("modifier_type", modifier_type)
+    if feature:
+        query = query.eq("feature", feature)
     result = query.order("created_at", desc=True).execute()
     return result.data
 
@@ -202,6 +251,7 @@ async def create_or_update_modifier(request: Request):
     student_id = body.get("student_id")
     course_id = body.get("course_id")
     modifier_type = body.get("modifier_type", "").strip()
+    feature = body.get("feature", "").strip() or None
     content = body.get("content", "").strip()
 
     if not modifier_type:
@@ -217,12 +267,17 @@ async def create_or_update_modifier(request: Request):
         query = query.eq("student_id", student_id)
     if course_id:
         query = query.eq("course_id", course_id)
+    if feature:
+        query = query.eq("feature", feature)
+    else:
+        query = query.is_("feature", "null")
     existing = query.execute()
 
     if existing.data:
         # Update existing
         result = sb.table("modifiers").update({
             "content": content,
+            "feature": feature,
             "updated_at": "now()",
         }).eq("id", existing.data[0]["id"]).execute()
     else:
@@ -231,6 +286,7 @@ async def create_or_update_modifier(request: Request):
             "student_id": student_id,
             "course_id": course_id,
             "modifier_type": modifier_type,
+            "feature": feature,
             "content": content,
         }).execute()
 
