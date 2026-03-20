@@ -53,9 +53,20 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
         {"number": 6, "key": "test_me", "name": "Test Me", "description": "Check Your Understanding"},
     ]
 
+    # Check actual content availability
+    content_available = {
+        "visual_overview": bool(topic_data.get("visual_overview_images") and len(topic_data.get("visual_overview_images", [])) > 0),
+        "podcast": bool(topic_data.get("podcast_audio_url")),
+        "walkthrough": bool(topic_data.get("learning_asset_url")),
+        "note_chart": bool(topic_data.get("notechart_url")),
+        "how_tested": False,
+        "test_me": False,
+    }
+
     for feature in features:
-        feature["state"] = progress_map.get(feature["key"], "not_available")
-        if topic_data.get("generation_status") != "complete":
+        if content_available.get(feature["key"], False):
+            feature["state"] = progress_map.get(feature["key"], "available")
+        else:
             feature["state"] = "not_available"
 
     return {
@@ -66,6 +77,39 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
             "generation_status": topic_data.get("generation_status", "none"),
             "course_id": topic_data["course_id"],
         },
+        "features": features,
+    }
+
+
+@router.get("/topics/{topic_id}/status")
+async def get_topic_status(topic_id: str, student: dict = Depends(get_current_student)):
+    """Return generation status and which outputs exist for a topic."""
+    sb = get_supabase()
+
+    result = sb.table("topics").select(
+        "id, name, week_number, generation_status, "
+        "learning_asset_url, podcast_script_url, podcast_audio_url, "
+        "notechart_url, visual_overview_script_url, visual_overview_images, "
+        "visual_overview_audio_urls"
+    ).eq("id", topic_id).execute()
+
+    if not result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic = result.data[0]
+
+    # Build feature availability map
+    features = {
+        "visual_overview": bool(topic.get("visual_overview_images") and len(topic.get("visual_overview_images", [])) > 0),
+        "podcast": bool(topic.get("podcast_audio_url")),
+        "walkthrough": bool(topic.get("learning_asset_url")),
+        "notechart": bool(topic.get("notechart_url")),
+        "how_tested": False,  # Requires exam upload — Phase 2
+        "test_me": False,     # Requires testing profile — Phase 2
+    }
+
+    return {
+        "topic": topic,
         "features": features,
     }
 
