@@ -1,3 +1,7 @@
+import logging
+
+logging.basicConfig(level=logging.INFO)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
@@ -6,6 +10,7 @@ from app.routers.webhooks import router as webhooks_router
 from app.routers.courses import router as courses_router
 from app.routers.topics import router as topics_router
 from app.routers.admin import router as admin_router
+from app.routers.generate import router as generate_router
 
 app = FastAPI(title="Open Path Engine", version="0.1.0")
 
@@ -26,6 +31,7 @@ app.include_router(webhooks_router)
 app.include_router(courses_router)
 app.include_router(topics_router)
 app.include_router(admin_router)
+app.include_router(generate_router)
 
 
 @app.get("/api/health")
