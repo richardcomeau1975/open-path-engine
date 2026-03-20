@@ -3,9 +3,11 @@ Content serving endpoints.
 Generates presigned URLs for R2-stored content so the browser can load it directly.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+import json
+from fastapi import APIRouter, Depends, HTTPException, Request
+from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
-from app.services.r2 import generate_presigned_url, generate_presigned_urls
+from app.services.r2 import download_from_r2, generate_presigned_url, generate_presigned_urls
 
 router = APIRouter()
 
@@ -85,3 +87,118 @@ async def presign_single(key: str, request: Request):
         return {"key": key, "url": url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to generate presigned URL: {str(e)}")
+
+
+@router.get("/api/topics/{topic_id}/notechart/questions")
+async def get_notechart_questions(topic_id: str, request: Request):
+    """
+    Return the note chart questions and any saved answers for the current student.
+    Questions come from the generated notechart JSON on R2.
+    Answers come from Supabase.
+    """
+    supabase = get_supabase()
+
+    # Get topic info
+    topic_result = supabase.table("topics").select("id, notechart_url").eq("id", topic_id).execute()
+    if not topic_result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic = topic_result.data[0]
+    if not topic.get("notechart_url"):
+        raise HTTPException(status_code=404, detail="No note chart generated yet")
+
+    # Download and parse questions
+    raw = download_from_r2(topic["notechart_url"]).decode("utf-8")
+
+    # Strip markdown code fences if present
+    clean = raw.strip()
+    if clean.startswith("```"):
+        first_nl = clean.index("\n")
+        clean = clean[first_nl + 1:]
+    if clean.endswith("```"):
+        clean = clean[:-3]
+    clean = clean.strip()
+
+    try:
+        questions = json.loads(clean)
+    except json.JSONDecodeError:
+        questions = [{"section": "Questions", "question": clean}]
+
+    # Try to get student ID for saved answers (no auth required for questions)
+    student_id = None
+    try:
+        from app.middleware.clerk_auth import get_current_clerk_user_id
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1]
+            import jwt
+            from app.config import settings
+            import httpx
+            jwks_url = settings.CLERK_JWKS_URL
+            resp = httpx.get(jwks_url)
+            jwks = resp.json()
+            public_key = jwt.algorithms.RSAAlgorithm.from_jwk(jwks["keys"][0])
+            payload = jwt.decode(token, public_key, algorithms=["RS256"])
+            clerk_user_id = payload.get("sub")
+            if clerk_user_id:
+                student_result = supabase.table("students").select("id").eq("clerk_id", clerk_user_id).limit(1).execute()
+                if student_result.data:
+                    student_id = student_result.data[0]["id"]
+    except Exception:
+        pass
+
+    saved_answers = {}
+    if student_id:
+        answers_result = supabase.table("note_chart_answers").select(
+            "question, answer"
+        ).eq("topic_id", topic_id).eq("student_id", student_id).execute()
+        saved_answers = {a["question"]: a["answer"] for a in answers_result.data}
+
+    # Merge answers into questions
+    for q in questions:
+        q["answer"] = saved_answers.get(q.get("question", ""), "")
+
+    return {"questions": questions}
+
+
+@router.post("/api/topics/{topic_id}/notechart/save")
+async def save_notechart_answers(
+    topic_id: str,
+    request: Request,
+    student: dict = Depends(get_current_student),
+):
+    """
+    Save note chart answers for the current student.
+    Body: { "answers": [{"section": "...", "question": "...", "answer": "..."}] }
+    Uses upsert to create or update.
+    """
+    supabase = get_supabase()
+
+    body = await request.json()
+    answers = body.get("answers", [])
+
+    if not answers:
+        return {"saved": 0}
+
+    student_id = student["id"]
+
+    # Upsert each answer
+    saved_count = 0
+    for item in answers:
+        question = item.get("question", "").strip()
+        answer = item.get("answer", "").strip()
+        section = item.get("section", "")
+
+        if not question:
+            continue
+
+        supabase.table("note_chart_answers").upsert({
+            "topic_id": topic_id,
+            "student_id": student_id,
+            "section": section,
+            "question": question,
+            "answer": answer,
+        }, on_conflict="topic_id,student_id,question").execute()
+        saved_count += 1
+
+    return {"saved": saved_count}
