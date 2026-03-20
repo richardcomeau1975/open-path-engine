@@ -205,19 +205,16 @@ async def list_course_topics(course_id: str):
 
 MODIFIER_TYPES = [
     {
-        "key": "admin",
-        "label": "Admin Modifier",
-        "description": "System-level tuning and adjustments. Filled by admin."
+        "key": "system_modifier",
+        "label": "System Modifier"
     },
     {
-        "key": "student_context",
-        "label": "Student Context",
-        "description": "Course-specific info from student uploads (syllabus, testing profile). Filled agentically or by admin for beta."
+        "key": "course_info",
+        "label": "Course Info"
     },
     {
-        "key": "student_preference",
-        "label": "Student Preference",
-        "description": "Personal interests and background. From questionnaire or chat. Makes material land."
+        "key": "personalization",
+        "label": "Personalization"
     }
 ]
 
@@ -307,11 +304,11 @@ async def delete_modifier(modifier_id: str):
 
 PROMPT_SOCKETS = [
     {"feature": "learning_asset_generator", "label": "Learning Asset Generator", "description": "Generates the learning asset from uploaded materials (Opus)"},
-    {"feature": "walkthrough", "label": "Knowledge Walkthrough", "description": "Constructivist tutor prompt (Sonnet with caching)"},
+    {"feature": "walkthrough_tutor", "label": "Knowledge Walkthrough", "description": "Constructivist tutor prompt (Sonnet with caching)"},
     {"feature": "podcast_generator", "label": "Podcast Generator", "description": "Generates podcast script from learning asset (Sonnet)"},
     {"feature": "visual_overview", "label": "Visual Overview", "description": "Generates narration script + image prompts (Sonnet)"},
     {"feature": "notechart", "label": "Note Chart", "description": "Generates framework-shaped recall questions (Sonnet)"},
-    {"feature": "exam_analysis", "label": "Exam Analysis", "description": "Analyzes uploaded sample exams (Sonnet)"},
+    {"feature": "exam_analyzer", "label": "Exam Analysis", "description": "Analyzes uploaded sample exams (Sonnet)"},
     {"feature": "quiz_generator", "label": "Quiz Generator", "description": "Generates quiz from learning asset + testing profile (Sonnet)"},
 ]
 
