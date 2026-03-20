@@ -29,3 +29,15 @@ def download_from_r2(key: str) -> bytes:
     r2 = get_r2_client()
     response = r2.get_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
     return response["Body"].read()
+
+
+def upload_bytes_to_r2(key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+    """Upload raw bytes to R2. Returns the key."""
+    r2 = get_r2_client()
+    r2.put_object(
+        Bucket=settings.R2_BUCKET_NAME,
+        Key=key,
+        Body=data,
+        ContentType=content_type,
+    )
+    return key
