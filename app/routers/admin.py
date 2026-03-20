@@ -425,6 +425,64 @@ async def global_replace(request: Request):
     return {"updated": updated, "count": len(updated)}
 
 
+# ── Batch Jobs ────────────────────────────────────────
+
+@router.get("/batch-jobs", dependencies=[Depends(require_admin)])
+async def list_batch_jobs():
+    """List all batch jobs, most recent first."""
+    sb = get_supabase()
+
+    result = sb.table("batch_jobs").select(
+        "id, topic_id, status, current_step, steps_completed, error_log, started_at, completed_at, created_at"
+    ).order("created_at", desc=True).limit(50).execute()
+
+    # Enrich with topic name
+    jobs = result.data
+    if jobs:
+        topic_ids = list(set(j["topic_id"] for j in jobs))
+        topics_result = sb.table("topics").select("id, name").in_("id", topic_ids).execute()
+        topic_names = {t["id"]: t["name"] for t in topics_result.data}
+        for job in jobs:
+            job["topic_name"] = topic_names.get(job["topic_id"], "Unknown")
+
+    return {"jobs": jobs}
+
+
+@router.post("/topics/{topic_id}/rerun", dependencies=[Depends(require_admin)])
+async def rerun_generation(topic_id: str):
+    """Re-run the generation pipeline for a topic. Resets status and kicks off a new run."""
+    import asyncio
+    from app.services.pipeline import run_pipeline
+
+    sb = get_supabase()
+
+    # Verify topic exists
+    topic_result = sb.table("topics").select("id, parsed_text_url").eq("id", topic_id).execute()
+    if not topic_result.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic = topic_result.data[0]
+    if not topic.get("parsed_text_url"):
+        raise HTTPException(status_code=400, detail="No parsed text found — upload files first")
+
+    # Reset topic status and all output URLs
+    sb.table("topics").update({
+        "generation_status": "pending",
+        "learning_asset_url": None,
+        "podcast_script_url": None,
+        "podcast_audio_url": None,
+        "notechart_url": None,
+        "visual_overview_script_url": None,
+        "visual_overview_images": [],
+        "visual_overview_audio_urls": [],
+    }).eq("id", topic_id).execute()
+
+    # Kick off pipeline in background
+    asyncio.create_task(run_pipeline(topic_id, sb))
+
+    return {"status": "started", "topic_id": topic_id, "message": "Generation pipeline re-started"}
+
+
 # ── Activity ──────────────────────────────────────────
 
 @router.get("/activity", dependencies=[Depends(require_admin)])
