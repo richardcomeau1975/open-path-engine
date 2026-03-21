@@ -309,6 +309,27 @@ async def upload_exam(
     analysis_key = f"{topic_id}/exam_analysis.md"
     upload_text_to_r2(analysis_key, analysis_text)
 
+    # Extract a short format description
+    format_prompt = (
+        "Read this exam analysis and write a single sentence describing the test format. "
+        "Include: question types (multiple choice, short answer, essay, etc), "
+        "cognitive level (recall, application, analysis, etc), "
+        "and any notable patterns. "
+        "Example: 'Multiple choice and short answer, testing recognition and application of concepts.' "
+        "Write ONLY the description, nothing else."
+        f"\n\n{analysis_text}"
+    )
+    format_result = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=200,
+        messages=[{"role": "user", "content": format_prompt}]
+    )
+    format_description = format_result.content[0].text.strip()
+
+    # Store format description on R2
+    format_key = f"{topic_id}/exam_format.txt"
+    upload_text_to_r2(format_key, format_description)
+
     # Upsert modifier
     student_id = student["id"]
     course_id = topic_result.data[0].get("course_id")
@@ -333,6 +354,7 @@ async def upload_exam(
 
     return {
         "analysis": analysis_text,
+        "format_description": format_description,
         "exam_file": exam_key,
         "analysis_file": analysis_key,
     }
@@ -340,14 +362,60 @@ async def upload_exam(
 
 @router.get("/api/topics/{topic_id}/exam/analysis")
 async def get_exam_analysis(topic_id: str, request: Request):
-    """Return stored exam analysis if it exists."""
+    """Return stored exam analysis if it exists. Falls back to sibling topic in same course."""
+    supabase = get_supabase()
     analysis_key = f"{topic_id}/exam_analysis.md"
 
     try:
-        analysis = download_from_r2(analysis_key).decode("utf-8")
-        return {"analysis": analysis, "exists": True}
+        analysis_text = download_from_r2(analysis_key).decode("utf-8")
+
+        # Try to read format description
+        format_description = None
+        try:
+            format_description = download_from_r2(f"{topic_id}/exam_format.txt").decode("utf-8")
+        except Exception:
+            pass
+
+        return {
+            "analysis": analysis_text,
+            "format_description": format_description,
+            "exists": True,
+        }
     except Exception:
-        return {"analysis": None, "exists": False}
+        pass
+
+    # No analysis for this topic — check siblings in the same course
+    topic_result = supabase.table("topics").select("course_id").eq("id", topic_id).execute()
+    if topic_result.data:
+        course_id = topic_result.data[0]["course_id"]
+        siblings = supabase.table("topics") \
+            .select("id") \
+            .eq("course_id", course_id) \
+            .neq("id", topic_id) \
+            .execute()
+
+        for sibling in siblings.data:
+            sib_id = sibling["id"]
+            try:
+                analysis_text = download_from_r2(f"{sib_id}/exam_analysis.md").decode("utf-8")
+
+                format_description = None
+                try:
+                    format_description = download_from_r2(f"{sib_id}/exam_format.txt").decode("utf-8")
+                except Exception:
+                    pass
+
+                return {
+                    "analysis": analysis_text,
+                    "format_description": format_description,
+                    "exists": True,
+                    "inherited": True,
+                    "inherited_from_topic_id": sib_id,
+                }
+            except Exception:
+                continue
+
+    return {"analysis": None, "format_description": None, "exists": False}
 
 
 @router.get("/api/topics/{topic_id}/learning-asset")
