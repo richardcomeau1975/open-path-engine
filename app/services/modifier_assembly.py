@@ -45,6 +45,20 @@ def gather_modifiers(
             if row.get("feature") is None or row.get("feature") == feature:
                 all_modifiers.append(row["content"])
 
+        # Student-scoped modifiers (personalization across all courses)
+        if student_id:
+            student_result = supabase.table("modifiers") \
+                .select("content, feature") \
+                .eq("modifier_type", modifier_type) \
+                .eq("student_id", student_id) \
+                .is_("course_id", "null") \
+                .is_("topic_id", "null") \
+                .execute()
+
+            for row in student_result.data:
+                if row.get("feature") is None or row.get("feature") == feature:
+                    all_modifiers.append(row["content"])
+
         # Course-scoped modifiers
         if course_id:
             course_result = supabase.table("modifiers") \

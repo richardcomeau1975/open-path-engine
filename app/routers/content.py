@@ -275,7 +275,7 @@ async def upload_exam(
         framework_type = course_res.data[0]["framework_type"] if course_res.data else None
 
     # Load exam analysis prompt (framework-aware lookup)
-    base_prompt = get_prompt_for_feature("exam_analysis", framework_type)
+    base_prompt = get_prompt_for_feature("exam_analyzer", framework_type)
 
     # Assemble modifiers
     student_id_for_mod = student["id"]
@@ -316,7 +316,7 @@ async def upload_exam(
     if course_id:
         existing = supabase.table("modifiers").select("id").eq(
             "student_id", student_id
-        ).eq("course_id", course_id).eq("modifier_type", "testing_profile").limit(1).execute()
+        ).eq("course_id", course_id).eq("modifier_type", "course_info").limit(1).execute()
 
         if existing.data:
             supabase.table("modifiers").update({
@@ -327,7 +327,7 @@ async def upload_exam(
                 "student_id": student_id,
                 "course_id": course_id,
                 "topic_id": topic_id,
-                "modifier_type": "testing_profile",
+                "modifier_type": "course_info",
                 "content": analysis_text,
             }).execute()
 

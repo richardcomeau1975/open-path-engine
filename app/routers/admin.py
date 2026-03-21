@@ -385,6 +385,16 @@ async def create_prompt(request: Request):
 @router.put("/prompts/{prompt_id}", dependencies=[Depends(require_admin)])
 async def edit_prompt(prompt_id: str, request: Request):
     body = await request.json()
+
+    # Deactivation request (no new version created)
+    if "is_active" in body and body["is_active"] is False:
+        sb = get_supabase()
+        current = sb.table("base_prompts").select("id").eq("id", prompt_id).execute()
+        if not current.data:
+            raise HTTPException(status_code=404, detail="Prompt not found")
+        sb.table("base_prompts").update({"is_active": False}).eq("id", prompt_id).execute()
+        return {"status": "deactivated"}
+
     new_content = body.get("content", "").strip()
 
     if not new_content:
