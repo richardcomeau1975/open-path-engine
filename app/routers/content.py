@@ -12,6 +12,7 @@ from app.services.supabase import get_supabase
 from app.services.file_parser import parse_file
 from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2, generate_presigned_url, generate_presigned_urls
 from app.services.prompt_lookup import get_prompt_for_feature
+from app.services.modifier_assembly import gather_modifiers
 
 router = APIRouter()
 
@@ -211,15 +212,20 @@ async def get_quiz(topic_id: str, request: Request):
     if not topic_result.data[0].get("learning_asset_url"):
         raise HTTPException(status_code=404, detail="No learning asset generated yet")
 
-    # Look up framework_type for this topic's course
+    # Look up course info for framework lookup + modifier assembly
     topic_for_fw = supabase.table("topics").select("course_id").eq("id", topic_id).execute()
     framework_type = None
+    student_id = None
+    course_id = None
     if topic_for_fw.data and topic_for_fw.data[0].get("course_id"):
-        course_res = supabase.table("courses").select("framework_type").eq("id", topic_for_fw.data[0]["course_id"]).execute()
-        framework_type = course_res.data[0]["framework_type"] if course_res.data else None
+        course_id = topic_for_fw.data[0]["course_id"]
+        course_res = supabase.table("courses").select("framework_type, student_id").eq("id", course_id).execute()
+        if course_res.data:
+            framework_type = course_res.data[0].get("framework_type")
+            student_id = course_res.data[0].get("student_id")
 
     try:
-        questions = await generate_quiz(topic_id, supabase, framework_type=framework_type)
+        questions = await generate_quiz(topic_id, supabase, framework_type=framework_type, student_id=student_id, course_id=course_id)
         return {"questions": questions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
@@ -271,6 +277,20 @@ async def upload_exam(
     # Load exam analysis prompt (framework-aware lookup)
     base_prompt = get_prompt_for_feature("exam_analysis", framework_type)
 
+    # Assemble modifiers
+    student_id_for_mod = student["id"]
+    modifier_text = gather_modifiers(
+        feature="exam_analyzer",
+        student_id=student_id_for_mod,
+        course_id=course_id,
+        topic_id=topic_id,
+    )
+
+    if modifier_text:
+        exam_prompt = f"{base_prompt}\n\n---\n\nMODIFIERS:\n\n{modifier_text}\n\n---\n\nSAMPLE EXAM CONTENT:\n\n{exam_text}"
+    else:
+        exam_prompt = f"{base_prompt}\n\n---\n\nSAMPLE EXAM CONTENT:\n\n{exam_text}"
+
     # Call Sonnet with streaming
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     analysis_text = ""
@@ -279,7 +299,7 @@ async def upload_exam(
         max_tokens=8000,
         messages=[{
             "role": "user",
-            "content": f"{base_prompt}\n\n---\n\nSAMPLE EXAM CONTENT:\n\n{exam_text}"
+            "content": exam_prompt
         }]
     ) as stream:
         for text in stream.text_stream:

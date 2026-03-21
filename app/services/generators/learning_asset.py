@@ -8,6 +8,7 @@ import anthropic
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2
 from app.services.prompt_lookup import get_prompt_for_feature
+from app.services.modifier_assembly import gather_modifiers
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ MODEL = "claude-opus-4-20250514"
 MAX_TOKENS = 16000
 
 
-async def generate_learning_asset(topic_id: str, supabase_client, framework_type: str = None) -> str:
+async def generate_learning_asset(topic_id: str, supabase_client, framework_type: str = None, student_id: str = None, course_id: str = None) -> str:
     """
     Generate a learning asset for a topic.
 
@@ -41,7 +42,20 @@ async def generate_learning_asset(topic_id: str, supabase_client, framework_type
     base_prompt = get_prompt_for_feature("learning_asset_generator", framework_type)
     logger.info(f"Learning asset [{topic_id}] — loaded base prompt ({len(base_prompt)} chars)")
 
-    # 4. Call Opus (streaming to avoid timeout on long requests)
+    # 4. Assemble modifiers
+    modifier_text = gather_modifiers(
+        feature="learning_asset_generator",
+        student_id=student_id,
+        course_id=course_id,
+        topic_id=topic_id,
+    )
+
+    if modifier_text:
+        prompt = f"{base_prompt}\n\n---\n\nMODIFIERS:\n\n{modifier_text}\n\n---\n\nSOURCE MATERIAL:\n\n{parsed_text}"
+    else:
+        prompt = f"{base_prompt}\n\n---\n\nSOURCE MATERIAL:\n\n{parsed_text}"
+
+    # Call Opus (streaming to avoid timeout on long requests)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
     chunks = []
@@ -51,7 +65,7 @@ async def generate_learning_asset(topic_id: str, supabase_client, framework_type
         messages=[
             {
                 "role": "user",
-                "content": f"{base_prompt}\n\n---\n\nSOURCE MATERIAL:\n\n{parsed_text}"
+                "content": prompt
             }
         ]
     ) as stream:

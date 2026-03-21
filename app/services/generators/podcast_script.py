@@ -8,6 +8,7 @@ import anthropic
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2
 from app.services.prompt_lookup import get_prompt_for_feature
+from app.services.modifier_assembly import gather_modifiers
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 16000
 
 
-async def generate_podcast_script(topic_id: str, supabase_client, framework_type: str = None) -> str:
+async def generate_podcast_script(topic_id: str, supabase_client, framework_type: str = None, student_id: str = None, course_id: str = None) -> str:
     """Generate a podcast script from the learning asset."""
     # Get topic info
     topic_result = supabase_client.table("topics").select(
@@ -33,6 +34,19 @@ async def generate_podcast_script(topic_id: str, supabase_client, framework_type
     # Load base prompt (framework-aware lookup)
     base_prompt = get_prompt_for_feature("podcast_generator", framework_type)
 
+    # Assemble modifiers
+    modifier_text = gather_modifiers(
+        feature="podcast_generator",
+        student_id=student_id,
+        course_id=course_id,
+        topic_id=topic_id,
+    )
+
+    if modifier_text:
+        prompt = f"{base_prompt}\n\n---\n\nMODIFIERS:\n\n{modifier_text}\n\n---\n\nLEARNING ASSET:\n\n{learning_asset}"
+    else:
+        prompt = f"{base_prompt}\n\n---\n\nLEARNING ASSET:\n\n{learning_asset}"
+
     # Call Sonnet (streaming to avoid timeout on long requests)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
@@ -42,7 +56,7 @@ async def generate_podcast_script(topic_id: str, supabase_client, framework_type
         max_tokens=MAX_TOKENS,
         messages=[{
             "role": "user",
-            "content": f"{base_prompt}\n\n---\n\nLEARNING ASSET:\n\n{learning_asset}"
+            "content": prompt
         }]
     ) as stream:
         for text in stream.text_stream:
