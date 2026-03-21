@@ -18,7 +18,7 @@ router = APIRouter()
 
 
 @router.get("/api/topics/{topic_id}/content")
-async def get_topic_content(topic_id: str, request: Request):
+async def get_topic_content(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
     """
     Return presigned URLs for all generated content for a topic.
     The frontend uses these URLs to load images, audio, and text directly from R2.
@@ -29,13 +29,15 @@ async def get_topic_content(topic_id: str, request: Request):
         "id, name, week_number, generation_status, "
         "learning_asset_url, podcast_script_url, podcast_audio_url, "
         "notechart_url, visual_overview_script_url, visual_overview_images, "
-        "visual_overview_audio_urls"
+        "visual_overview_audio_urls, courses(student_id)"
     ).eq("id", topic_id).execute()
 
     if not result.data:
         raise HTTPException(status_code=404, detail="Topic not found")
 
     topic = result.data[0]
+    if topic.get("courses", {}).get("student_id") != student["id"]:
+        raise HTTPException(status_code=403, detail="Not your topic")
 
     # Build presigned URLs for all content
     content = {
@@ -79,10 +81,10 @@ async def get_topic_content(topic_id: str, request: Request):
 
 
 @router.get("/api/content/presign")
-async def presign_single(key: str, request: Request):
+async def presign_single(key: str, request: Request, student: dict = Depends(get_current_student)):
     """
     Generate a presigned URL for a single R2 key.
-    Useful for on-demand content loading.
+    Useful for on-demand content loading. Requires authentication.
     """
     if not key:
         raise HTTPException(status_code=400, detail="key parameter required")
@@ -192,7 +194,7 @@ async def save_notechart_answers(
 
 
 @router.get("/api/topics/{topic_id}/quiz")
-async def get_quiz(topic_id: str, request: Request):
+async def get_quiz(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
     """
     Return quiz questions for a topic.
     Generates on first request, caches on R2 for subsequent requests.
@@ -201,13 +203,16 @@ async def get_quiz(topic_id: str, request: Request):
 
     supabase = get_supabase()
 
-    # Verify topic exists and has a learning asset
+    # Verify topic exists, has a learning asset, and belongs to this student
     topic_result = supabase.table("topics").select(
-        "id, learning_asset_url"
+        "id, learning_asset_url, courses(student_id)"
     ).eq("id", topic_id).execute()
 
     if not topic_result.data:
         raise HTTPException(status_code=404, detail="Topic not found")
+
+    if topic_result.data[0].get("courses", {}).get("student_id") != student["id"]:
+        raise HTTPException(status_code=403, detail="Not your topic")
 
     if not topic_result.data[0].get("learning_asset_url"):
         raise HTTPException(status_code=404, detail="No learning asset generated yet")
@@ -361,9 +366,17 @@ async def upload_exam(
 
 
 @router.get("/api/topics/{topic_id}/exam/analysis")
-async def get_exam_analysis(topic_id: str, request: Request):
+async def get_exam_analysis(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
     """Return stored exam analysis if it exists. Falls back to sibling topic in same course."""
     supabase = get_supabase()
+
+    # Verify ownership
+    topic_check = supabase.table("topics").select("id, courses(student_id)").eq("id", topic_id).execute()
+    if not topic_check.data:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    if topic_check.data[0].get("courses", {}).get("student_id") != student["id"]:
+        raise HTTPException(status_code=403, detail="Not your topic")
+
     analysis_key = f"{topic_id}/exam_analysis.md"
 
     try:
@@ -419,12 +432,15 @@ async def get_exam_analysis(topic_id: str, request: Request):
 
 
 @router.get("/api/topics/{topic_id}/learning-asset")
-async def get_learning_asset(topic_id: str, request: Request):
+async def get_learning_asset(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
     """Return the learning asset text."""
     supabase = get_supabase()
-    topic_result = supabase.table("topics").select("id, learning_asset_url").eq("id", topic_id).execute()
+    topic_result = supabase.table("topics").select("id, learning_asset_url, courses(student_id)").eq("id", topic_id).execute()
     if not topic_result.data:
         raise HTTPException(status_code=404, detail="Topic not found")
+
+    if topic_result.data[0].get("courses", {}).get("student_id") != student["id"]:
+        raise HTTPException(status_code=403, detail="Not your topic")
 
     topic = topic_result.data[0]
     if not topic.get("learning_asset_url"):
