@@ -50,6 +50,15 @@ async def run_pipeline(topic_id: str, supabase_client):
         }).execute()
         job_id = job_result.data[0]["id"]
 
+        # Get the topic's course_id and then the course's framework_type
+        topic_result = supabase_client.table("topics").select("course_id").eq("id", topic_id).execute()
+        course_id = topic_result.data[0]["course_id"] if topic_result.data else None
+        framework_type = None
+        if course_id:
+            course_result = supabase_client.table("courses").select("framework_type").eq("id", course_id).execute()
+            framework_type = course_result.data[0]["framework_type"] if course_result.data else None
+        logger.info(f"Pipeline [{topic_id}] — framework_type: {framework_type}")
+
         # Update topic status
         supabase_client.table("topics").update({
             "generation_status": "generating"
@@ -69,13 +78,13 @@ async def run_pipeline(topic_id: str, supabase_client):
             if step_name == "parse_files":
                 logger.info(f"Pipeline [{topic_id}] — parse_files: already done during upload, skipping")
             elif step_name == "generate_learning_asset":
-                await gen_learning_asset(topic_id, supabase_client)
+                await gen_learning_asset(topic_id, supabase_client, framework_type=framework_type)
             elif step_name == "generate_podcast_script":
-                await gen_podcast_script(topic_id, supabase_client)
+                await gen_podcast_script(topic_id, supabase_client, framework_type=framework_type)
             elif step_name == "generate_notechart":
-                await gen_notechart(topic_id, supabase_client)
+                await gen_notechart(topic_id, supabase_client, framework_type=framework_type)
             elif step_name == "generate_visual_overview_script":
-                await gen_visual_overview(topic_id, supabase_client)
+                await gen_visual_overview(topic_id, supabase_client, framework_type=framework_type)
             elif step_name == "generate_images":
                 await gen_images(topic_id, supabase_client)
             elif step_name == "generate_podcast_audio":

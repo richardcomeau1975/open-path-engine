@@ -7,6 +7,7 @@ import logging
 import anthropic
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2
+from app.services.prompt_lookup import get_prompt_for_feature
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 8000
 
 
-async def generate_notechart(topic_id: str, supabase_client) -> str:
+async def generate_notechart(topic_id: str, supabase_client, framework_type: str = None) -> str:
     """Generate note chart questions from the learning asset."""
     # Get topic info
     topic_result = supabase_client.table("topics").select(
@@ -29,15 +30,8 @@ async def generate_notechart(topic_id: str, supabase_client) -> str:
     learning_asset = download_from_r2(topic["learning_asset_url"]).decode("utf-8")
     logger.info(f"Note chart [{topic_id}] — loaded learning asset ({len(learning_asset)} chars)")
 
-    # Load base prompt
-    prompt_result = supabase_client.table("base_prompts").select(
-        "id, content"
-    ).eq("feature", "notechart").eq("is_active", True).limit(1).execute()
-
-    if not prompt_result.data:
-        raise ValueError("No active prompt found for feature 'notechart'")
-
-    base_prompt = prompt_result.data[0]["content"]
+    # Load base prompt (framework-aware lookup)
+    base_prompt = get_prompt_for_feature("notechart", framework_type)
 
     # Call Sonnet (streaming to avoid timeout on long requests)
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)

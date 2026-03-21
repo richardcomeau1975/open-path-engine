@@ -7,6 +7,7 @@ import logging
 import anthropic
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2
+from app.services.prompt_lookup import get_prompt_for_feature
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ MODEL = "claude-opus-4-20250514"
 MAX_TOKENS = 16000
 
 
-async def generate_learning_asset(topic_id: str, supabase_client) -> str:
+async def generate_learning_asset(topic_id: str, supabase_client, framework_type: str = None) -> str:
     """
     Generate a learning asset for a topic.
 
@@ -36,15 +37,8 @@ async def generate_learning_asset(topic_id: str, supabase_client) -> str:
     parsed_text = download_from_r2(topic["parsed_text_url"]).decode("utf-8")
     logger.info(f"Learning asset [{topic_id}] — loaded parsed text ({len(parsed_text)} chars)")
 
-    # 3. Load base prompt from Supabase
-    prompt_result = supabase_client.table("base_prompts").select(
-        "id, content"
-    ).eq("feature", "learning_asset_generator").eq("is_active", True).limit(1).execute()
-
-    if not prompt_result.data:
-        raise ValueError("No active prompt found for feature 'learning_asset_generator'. Add one in the admin panel.")
-
-    base_prompt = prompt_result.data[0]["content"]
+    # 3. Load base prompt (framework-aware lookup)
+    base_prompt = get_prompt_for_feature("learning_asset_generator", framework_type)
     logger.info(f"Learning asset [{topic_id}] — loaded base prompt ({len(base_prompt)} chars)")
 
     # 4. Call Opus (streaming to avoid timeout on long requests)

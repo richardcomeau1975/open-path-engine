@@ -9,6 +9,7 @@ import logging
 import anthropic
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2
+from app.services.prompt_lookup import get_prompt_for_feature
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ MODEL = "claude-sonnet-4-20250514"
 MAX_TOKENS = 8000
 
 
-async def generate_quiz(topic_id: str, supabase_client) -> list[dict]:
+async def generate_quiz(topic_id: str, supabase_client, framework_type: str = None) -> list[dict]:
     """
     Generate quiz questions from the learning asset.
     Checks R2 for cached quiz first. If not found, generates and caches.
@@ -50,15 +51,8 @@ async def generate_quiz(topic_id: str, supabase_client) -> list[dict]:
     learning_asset = download_from_r2(topic["learning_asset_url"]).decode("utf-8")
     logger.info(f"Quiz [{topic_id}] — loaded learning asset ({len(learning_asset)} chars)")
 
-    # Load base prompt
-    prompt_result = supabase_client.table("base_prompts").select(
-        "id, content"
-    ).eq("feature", "quiz_generator").eq("is_active", True).limit(1).execute()
-
-    if not prompt_result.data:
-        raise ValueError("No active prompt found for feature 'quiz_generator'")
-
-    base_prompt = prompt_result.data[0]["content"]
+    # Load base prompt (framework-aware lookup)
+    base_prompt = get_prompt_for_feature("quiz_generator", framework_type)
 
     # Call Sonnet with streaming to avoid timeout
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)

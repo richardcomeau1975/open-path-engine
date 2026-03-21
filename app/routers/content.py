@@ -11,6 +11,7 @@ from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
 from app.services.file_parser import parse_file
 from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2, generate_presigned_url, generate_presigned_urls
+from app.services.prompt_lookup import get_prompt_for_feature
 
 router = APIRouter()
 
@@ -210,8 +211,15 @@ async def get_quiz(topic_id: str, request: Request):
     if not topic_result.data[0].get("learning_asset_url"):
         raise HTTPException(status_code=404, detail="No learning asset generated yet")
 
+    # Look up framework_type for this topic's course
+    topic_for_fw = supabase.table("topics").select("course_id").eq("id", topic_id).execute()
+    framework_type = None
+    if topic_for_fw.data and topic_for_fw.data[0].get("course_id"):
+        course_res = supabase.table("courses").select("framework_type").eq("id", topic_for_fw.data[0]["course_id"]).execute()
+        framework_type = course_res.data[0]["framework_type"] if course_res.data else None
+
     try:
-        questions = await generate_quiz(topic_id, supabase)
+        questions = await generate_quiz(topic_id, supabase, framework_type=framework_type)
         return {"questions": questions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Quiz generation failed: {str(e)}")
@@ -253,15 +261,15 @@ async def upload_exam(
     except ValueError:
         exam_text = f"[Uploaded image file: {filename} — {len(file_bytes)} bytes. Unable to extract text from image.]"
 
-    # Load exam analysis prompt
-    prompt_result = supabase.table("base_prompts").select(
-        "id, content"
-    ).eq("feature", "exam_analysis").eq("is_active", True).limit(1).execute()
+    # Look up framework_type for this topic's course
+    framework_type = None
+    course_id = topic_result.data[0].get("course_id")
+    if course_id:
+        course_res = supabase.table("courses").select("framework_type").eq("id", course_id).execute()
+        framework_type = course_res.data[0]["framework_type"] if course_res.data else None
 
-    if not prompt_result.data:
-        raise HTTPException(status_code=500, detail="No active exam analysis prompt found")
-
-    base_prompt = prompt_result.data[0]["content"]
+    # Load exam analysis prompt (framework-aware lookup)
+    base_prompt = get_prompt_for_feature("exam_analysis", framework_type)
 
     # Call Sonnet with streaming
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
