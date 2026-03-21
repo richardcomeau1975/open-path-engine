@@ -177,16 +177,26 @@ async def update_course(course_id: str, request: Request):
 
 @router.get("/framework-types", dependencies=[Depends(require_admin)])
 async def list_framework_types():
-    sb = get_supabase()
-    prompts = sb.table("base_prompts").select("framework_type").eq("is_active", True).not_.is_("framework_type", "null").execute()
-    courses = sb.table("courses").select("framework_type").not_.is_("framework_type", "null").execute()
+    predefined = [
+        "applied_systems_thinking",
+        "phenomenon_explanation",
+        "argument_evaluation",
+        "framework_application",
+        "close_reading",
+        "algorithm_proof",
+    ]
 
-    types = set()
+    sb = get_supabase()
+    types = set(predefined)
+
+    prompts = sb.table("base_prompts").select("framework_type").eq("is_active", True).not_.is_("framework_type", "null").execute()
     for p in prompts.data:
-        if p["framework_type"]:
+        if p.get("framework_type"):
             types.add(p["framework_type"])
+
+    courses = sb.table("courses").select("framework_type").not_.is_("framework_type", "null").execute()
     for c in courses.data:
-        if c["framework_type"]:
+        if c.get("framework_type"):
             types.add(c["framework_type"])
 
     return {"framework_types": sorted(list(types))}
