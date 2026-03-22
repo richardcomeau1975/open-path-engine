@@ -189,3 +189,110 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
             "Connection": "keep-alive",
         }
     )
+
+
+@router.post("/{topic_id}/start-gaps")
+async def start_gaps_session(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
+    supabase = get_supabase()
+
+    # Get fuzzy concepts from verifier results
+    fuzzy = supabase.table("verifier_results") \
+        .select("question, got, missing") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .eq("status", "fuzzy") \
+        .execute()
+
+    if not fuzzy.data:
+        return {"session": None, "message": "No gaps to work on — everything is solid."}
+
+    # Build a scope description for the AI
+    gaps_context = "FOCUS ON THESE SPECIFIC GAPS:\n\n"
+    for item in fuzzy.data:
+        gaps_context += f"Question: {item['question']}\n"
+        gaps_context += f"What the student got: {item['got']}\n"
+        gaps_context += f"What's missing: {item['missing']}\n\n"
+
+    # Create session with mode='gaps' and the gaps context as cluster
+    result = supabase.table("walkthrough_sessions").insert({
+        "topic_id": topic_id,
+        "student_id": student["id"],
+        "mode": "gaps",
+        "cluster": gaps_context,
+        "messages": [],
+        "is_active": True,
+    }).execute()
+
+    return {"session": result.data[0], "gaps": fuzzy.data}
+
+
+@router.post("/{topic_id}/resolve-gap")
+async def resolve_gap(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
+    body = await request.json()
+    question = body.get("question")
+
+    if not question:
+        raise HTTPException(400, "question required")
+
+    supabase = get_supabase()
+
+    # Update verifier result from fuzzy to solid
+    supabase.table("verifier_results") \
+        .update({"status": "solid", "missing": None, "updated_at": datetime.utcnow().isoformat()}) \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .eq("question", question) \
+        .execute()
+
+    return {"status": "resolved"}
+
+
+@router.get("/{topic_id}/progress")
+async def get_progress(topic_id: str, student: dict = Depends(get_current_student)):
+    supabase = get_supabase()
+
+    # Walkthrough sessions
+    sessions = supabase.table("walkthrough_sessions") \
+        .select("id, mode, is_active, messages, created_at, updated_at") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .order("updated_at", desc=True) \
+        .execute()
+
+    # Verifier results
+    verifier = supabase.table("verifier_results") \
+        .select("question, status, got, missing") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .execute()
+
+    # Note chart answers
+    answers = supabase.table("note_chart_answers") \
+        .select("question, answer") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .execute()
+
+    total_questions = len(answers.data) if answers.data else 0
+    answered = len([a for a in (answers.data or []) if a.get("answer", "").strip()])
+
+    solid = len([v for v in (verifier.data or []) if v["status"] == "solid"])
+    fuzzy = len([v for v in (verifier.data or []) if v["status"] == "fuzzy"])
+
+    walkthrough_sessions_count = len(sessions.data) if sessions.data else 0
+    total_messages = sum(len(s.get("messages", [])) for s in (sessions.data or []))
+
+    return {
+        "active_recall": {
+            "total_questions": total_questions,
+            "answered": answered,
+            "evaluated": solid + fuzzy > 0,
+            "solid": solid,
+            "fuzzy": fuzzy,
+        },
+        "walkthrough": {
+            "sessions": walkthrough_sessions_count,
+            "total_exchanges": total_messages // 2,
+            "has_active_session": any(s.get("is_active") for s in (sessions.data or [])),
+        },
+    }

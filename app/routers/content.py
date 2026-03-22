@@ -4,6 +4,7 @@ Generates presigned URLs for R2-stored content so the browser can load it direct
 """
 
 import json
+import re
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException, Request
 from app.config import settings
@@ -429,6 +430,122 @@ async def get_exam_analysis(topic_id: str, request: Request, student: dict = Dep
                 continue
 
     return {"analysis": None, "format_description": None, "exists": False}
+
+
+@router.post("/api/topics/{topic_id}/notechart/evaluate")
+async def evaluate_notechart(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
+    supabase = get_supabase()
+
+    # Get the student's answers
+    answers_result = supabase.table("note_chart_answers") \
+        .select("section, question, answer") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .execute()
+
+    if not answers_result.data:
+        raise HTTPException(400, "No answers to evaluate")
+
+    # Get the learning asset
+    topic = supabase.table("topics") \
+        .select("learning_asset_url, course_id") \
+        .eq("id", topic_id) \
+        .execute()
+
+    if not topic.data or not topic.data[0].get("learning_asset_url"):
+        raise HTTPException(400, "No learning asset available")
+
+    asset_bytes = download_from_r2(topic.data[0]["learning_asset_url"])
+    learning_asset = asset_bytes.decode("utf-8")
+
+    # Format the answers for the prompt
+    answers_text = ""
+    for a in answers_result.data:
+        answers_text += f"Section: {a.get('section', 'General')}\n"
+        answers_text += f"Question: {a['question']}\n"
+        answers_text += f"Student's answer: {a.get('answer', '(blank)')}\n\n"
+
+    # Build the evaluation prompt
+    eval_prompt = (
+        "You are evaluating a student's recall answers against a learning asset. "
+        "For each question, determine if the student's answer is SOLID (demonstrates understanding "
+        "of the key concepts) or FUZZY (missing key concepts, vague, or incorrect).\n\n"
+        "For SOLID answers, briefly note what they got right.\n"
+        "For FUZZY answers, briefly note what's missing — what the student got (green) and what's missing (amber).\n\n"
+        "Respond in ONLY this JSON format, no other text:\n"
+        "```json\n"
+        '[\n'
+        '  {\n'
+        '    "question": "the exact question text",\n'
+        '    "status": "solid" or "fuzzy",\n'
+        '    "got": "what the student demonstrated (brief)",\n'
+        '    "missing": "what is missing (brief, null if solid)"\n'
+        '  }\n'
+        ']\n'
+        "```\n\n"
+        f"LEARNING ASSET:\n\n{learning_asset}\n\n"
+        f"STUDENT'S ANSWERS:\n\n{answers_text}"
+    )
+
+    # Call Haiku
+    client = anthropic.Anthropic()
+
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=4096,
+        messages=[{"role": "user", "content": eval_prompt}],
+    )
+
+    response_text = response.content[0].text
+
+    # Extract JSON from potential markdown code block
+    json_match = re.search(r'```json\s*(.*?)\s*```', response_text, re.DOTALL)
+    if json_match:
+        json_text = json_match.group(1)
+    else:
+        json_text = response_text.strip()
+
+    try:
+        evaluation = json.loads(json_text)
+    except json.JSONDecodeError:
+        raise HTTPException(500, "Failed to parse evaluation response")
+
+    # Store results
+    for item in evaluation:
+        supabase.table("verifier_results").upsert({
+            "topic_id": topic_id,
+            "student_id": student["id"],
+            "question": item["question"],
+            "status": item["status"],
+            "got": item.get("got", ""),
+            "missing": item.get("missing"),
+        }, on_conflict="topic_id,student_id,question").execute()
+
+    return {"evaluation": evaluation}
+
+
+@router.get("/api/topics/{topic_id}/notechart/evaluation")
+async def get_evaluation(topic_id: str, student: dict = Depends(get_current_student)):
+    supabase = get_supabase()
+
+    result = supabase.table("verifier_results") \
+        .select("question, status, got, missing") \
+        .eq("topic_id", topic_id) \
+        .eq("student_id", student["id"]) \
+        .execute()
+
+    if not result.data:
+        return {"evaluation": None, "exists": False}
+
+    solid = [r for r in result.data if r["status"] == "solid"]
+    fuzzy = [r for r in result.data if r["status"] == "fuzzy"]
+
+    return {
+        "evaluation": result.data,
+        "solid": solid,
+        "fuzzy": fuzzy,
+        "exists": True,
+    }
 
 
 @router.get("/api/topics/{topic_id}/learning-asset")
