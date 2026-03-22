@@ -317,7 +317,7 @@ PROMPT_SOCKETS = [
     {"feature": "walkthrough_tutor", "label": "Knowledge Walkthrough", "description": "Constructivist tutor prompt (Sonnet with caching)"},
     {"feature": "podcast_generator", "label": "Podcast Generator", "description": "Generates podcast script from learning asset (Sonnet)"},
     {"feature": "visual_overview", "label": "Visual Overview", "description": "Generates narration script + image prompts (Sonnet)"},
-    {"feature": "notechart", "label": "Note Chart", "description": "Generates framework-shaped recall questions (Sonnet)"},
+    {"feature": "notechart", "label": "Active Recall", "description": "Generates framework-shaped recall questions (Sonnet)"},
     {"feature": "exam_analyzer", "label": "Exam Analysis", "description": "Analyzes uploaded sample exams (Sonnet)"},
     {"feature": "quiz_generator", "label": "Quiz Generator", "description": "Generates quiz from learning asset + testing profile (Sonnet)"},
 ]

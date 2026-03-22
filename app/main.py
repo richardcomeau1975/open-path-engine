@@ -12,6 +12,7 @@ from app.routers.topics import router as topics_router
 from app.routers.admin import router as admin_router
 from app.routers.generate import router as generate_router
 from app.routers.content import router as content_router
+from app.routers.walkthrough import router as walkthrough_router
 
 app = FastAPI(title="Open Path Engine", version="0.1.0")
 
@@ -34,6 +35,7 @@ app.include_router(topics_router)
 app.include_router(admin_router)
 app.include_router(generate_router)
 app.include_router(content_router)
+app.include_router(walkthrough_router)
 
 
 @app.get("/api/health")
