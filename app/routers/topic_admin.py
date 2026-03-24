@@ -18,6 +18,7 @@ from app.services.r2 import (
     download_from_r2,
     upload_text_to_r2,
     upload_bytes_to_r2,
+    generate_presigned_url,
 )
 from app.services.modifier_assembly import gather_modifiers
 
@@ -330,6 +331,44 @@ async def get_admin_topic_status(
         "generation_status": topic.get("generation_status"),
         "outputs": outputs,
     }
+
+
+# ---------------------------------------------------------------------------
+# 2b. GET /api/topics/{id}/admin/view/{type}
+# ---------------------------------------------------------------------------
+
+@router.get("/topics/{topic_id}/admin/view/{output_type}")
+async def view_admin_output(
+    topic_id: str,
+    output_type: str,
+    student: dict = Depends(require_admin_student),
+):
+    """Return the text content of a text-based output (learning_asset, podcast_script, notechart, visual_overview_script)."""
+    if output_type not in COLUMN_MAP:
+        raise HTTPException(status_code=400, detail=f"Unknown output type: {output_type}")
+
+    sb = get_supabase()
+    topic = _get_topic_or_404(sb, topic_id)
+    col = COLUMN_MAP[output_type]
+    val = topic.get(col)
+
+    if not val:
+        raise HTTPException(status_code=404, detail=f"{output_type} not generated yet")
+
+    # For text outputs, download and return content
+    if output_type in TEXT_OUTPUT_TYPES:
+        text = download_from_r2(val).decode("utf-8")
+        return {"output_type": output_type, "content": text, "length": len(text)}
+
+    # For array types, return the keys with presigned URLs
+    if output_type in ARRAY_COLUMNS:
+        keys = val if isinstance(val, list) else []
+        urls = [{"key": k, "url": generate_presigned_url(k)} for k in keys]
+        return {"output_type": output_type, "files": urls, "count": len(urls)}
+
+    # For single media files, return presigned URL
+    url = generate_presigned_url(val)
+    return {"output_type": output_type, "url": url, "key": val}
 
 
 # ---------------------------------------------------------------------------
