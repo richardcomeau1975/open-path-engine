@@ -374,26 +374,6 @@ async def generate_from(request: Request, topic_id: str, output_type: str):
 
 
 # ══════════════════════════════════════════════════════════════════
-# ENDPOINT 4c: Clear an output slot
-# ══════════════════════════════════════════════════════════════════
-
-@router.delete("/topics/{topic_id}/outputs/{output_type}")
-async def clear_output(request: Request, topic_id: str, output_type: str):
-    """Clear an output slot back to empty."""
-    require_admin(request)
-    if output_type not in OUTPUT_TYPES:
-        raise HTTPException(status_code=400, detail=f"Unknown: {output_type}")
-    supabase = get_supabase()
-    col = OUTPUT_TYPES[output_type]["column"]
-    if output_type in ("visual_overview_images", "narration_audio"):
-        supabase.table("topics").update({col: []}).eq("id", topic_id).execute()
-    else:
-        supabase.table("topics").update({col: None}).eq("id", topic_id).execute()
-    logger.info(f"Test env — cleared {output_type} for {topic_id}")
-    return {"cleared": output_type}
-
-
-# ══════════════════════════════════════════════════════════════════
 # ENDPOINT 5: Download/view any output
 # ══════════════════════════════════════════════════════════════════
 
