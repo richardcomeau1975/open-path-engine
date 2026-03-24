@@ -77,7 +77,7 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
                 },
                 json={
                     "model": "gpt-image-1",
-                    "prompt": f"Educational illustration for a university course: {image_prompt}. Clean, clear, professional educational style. No text overlay.",
+                    "prompt": f"Editorial illustration in warm watercolor and ink sketch style on a cream off-white background. Lots of white space. Human figures with expressive body language and emotion. Gentle muted color palette with warm grays, soft earth tones, and one subtle accent color. Style of newspaper editorial illustrations. No text, no labels, no diagrams, no icons, no clipart, no speech bubbles. Scene: {image_prompt}",
                     "n": 1,
                     "size": "1536x1024",
                     "quality": "low",
