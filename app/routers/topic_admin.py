@@ -212,7 +212,7 @@ async def _generate_text_output(
             student_id=student_id,
             course_id=course_id,
         )
-        result_text = await _call_claude(prompt, model="claude-sonnet-4-20250514", max_tokens=8192)
+        result_text = await _call_claude(prompt, model="claude-sonnet-4-20250514", max_tokens=16384)
         await store_podcast_script_result(topic_id, sb, result_text)
 
     elif output_type == "notechart":
@@ -494,6 +494,9 @@ async def generate_test_output(
     # Determine model and max_tokens
     if output_type == "learning_asset":
         model = "claude-opus-4-20250514"
+        max_tokens = 16384
+    elif output_type == "podcast_script":
+        model = "claude-sonnet-4-20250514"
         max_tokens = 16384
     else:
         model = "claude-sonnet-4-20250514"
