@@ -250,7 +250,104 @@ async def voice_walkthrough_message(topic_id: str, request: Request, student: di
     }
 
 
-# ── Filler audio endpoint ────────────────────────────────────────
+# ── Filler audio generation (one-time admin endpoint) ────────────
+
+@router.post("/podcast/generate-fillers")
+async def generate_filler_clips(student: dict = Depends(get_current_student)):
+    """One-time endpoint to generate all 16 filler audio clips and store on R2. Admin only."""
+    if not student.get("is_admin"):
+        raise HTTPException(403, "Admin only")
+
+    from app.services.r2 import upload_bytes_to_r2
+    import io
+    import wave
+
+    GEMINI_TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+    SA = "HOST A"
+    SB = "HOST B"
+
+    FILLERS = {
+        "a": [
+            f"{SA}: Oh — yeah yeah yeah, so that's actually the thing, right?",
+            f"{SB}: OK so you're picking up on exactly what I was about to get into—",
+            f"{SA}: Ha! I was literally just going to say something about that—",
+            f"{SB}: Oh that's — yeah, that's the key question actually.",
+        ],
+        "b": [
+            f"{SA}: Ooh. OK. That's interesting, let me think about that for a second...",
+            f"{SB}: Hmm — you know what, that's a really good question actually...",
+            f"{SA}: Oh wow, OK — so that's a different angle but it connects...",
+            f"{SB}: That's — yeah. OK so here's the thing about that...",
+        ],
+        "c": [
+            f"{SA}: Right right right — OK so let me back up for a sec...",
+            f"{SB}: Oh — yeah, I probably should have been clearer about that...",
+            f"{SA}: OK fair, let me put it differently—",
+            f"{SB}: Yeah so — the way I think about it is...",
+        ],
+        "d": [
+            f"{SA}: Oh — OK I see where you're going with that...",
+            f"{SB}: Hm. That's fair actually. So here's the thing though—",
+            f"{SA}: Yeah, no, that's a legitimate question...",
+            f"{SB}: Interesting — so you're saying like, why would that be the case?",
+        ],
+    }
+
+    results = []
+    for category, lines in FILLERS.items():
+        for i, line in enumerate(lines, 1):
+            key = f"filler_audio/category_{category}_{i}.wav"
+            prompt = f"TTS the following conversation between {SA} and {SB}:\n\n{line}"
+
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "multiSpeakerVoiceConfig": {
+                            "speakerVoiceConfigs": [
+                                {"speaker": SA, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+                                {"speaker": SB, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
+                            ]
+                        }
+                    },
+                    "temperature": 2.0,
+                }
+            }
+
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        f"{GEMINI_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}",
+                        json=payload,
+                    )
+
+                if response.status_code != 200:
+                    results.append({"key": key, "status": "failed", "error": f"{response.status_code}"})
+                    continue
+
+                result = response.json()
+                audio_b64 = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                pcm_data = base64.b64decode(audio_b64)
+
+                buf = io.BytesIO()
+                with wave.open(buf, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(24000)
+                    wf.writeframes(pcm_data)
+                wav_data = buf.getvalue()
+
+                upload_bytes_to_r2(key, wav_data, content_type="audio/wav")
+                duration = len(pcm_data) / (24000 * 2)
+                results.append({"key": key, "status": "ok", "duration": f"{duration:.1f}s", "bytes": len(wav_data)})
+            except Exception as e:
+                results.append({"key": key, "status": "failed", "error": str(e)})
+
+    return {"generated": len([r for r in results if r["status"] == "ok"]), "total": 16, "results": results}
+
+
+# ── Filler audio URLs ────────────────────────────────────────────
 
 @router.get("/podcast/filler-urls")
 async def get_filler_urls(student: dict = Depends(get_current_student)):
