@@ -283,7 +283,7 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
 
     # Step 2: Get learning asset
     topic = supabase.table("topics") \
-        .select("learning_asset_url, course_id") \
+        .select("learning_asset_url, podcast_script_url, course_id") \
         .eq("id", topic_id) \
         .execute()
 
@@ -298,14 +298,45 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
         except:
             pass
 
-    # Step 3: Answer with Sonnet
+    # Step 3: Answer with Sonnet — in character as the podcast hosts
+    # Also load the podcast script for context on what they were discussing
+    podcast_script = ""
+    if topic.data[0].get("podcast_script_url"):
+        try:
+            ps_bytes = download_from_r2(topic.data[0]["podcast_script_url"])
+            podcast_script = ps_bytes.decode("utf-8")
+        except:
+            pass
+
+    # Detect speaker names from script
+    speaker_a = "HOST A"
+    speaker_b = "HOST B"
+    for line in podcast_script.split("\n")[:20]:
+        line = line.strip()
+        if ":" in line:
+            name = line.split(":")[0].strip()
+            if name and len(name) < 30 and not name.startswith("["):
+                if speaker_a == "HOST A":
+                    speaker_a = name
+                elif name != speaker_a:
+                    speaker_b = name
+                    break
+
     system_prompt = (
-        "You are answering a student's question about course material they're listening to in a podcast. "
-        "Keep your answer concise, clear, and directly relevant to their question. "
-        "Use the learning asset below as your source of truth. "
-        "If the question is about something not in the learning asset, say so honestly.\n\n"
-        f"LEARNING ASSET:\n\n{learning_asset}"
+        f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
+        "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
+        "Answer the question naturally as part of the conversation. You know this material deeply. "
+        "If the question is about something tangential, connect it back to what you were discussing. "
+        "If you genuinely don't know, say something like 'honestly that's a great question, I think it connects to...' and bridge to something you do know. "
+        "NEVER say: learning asset, system, material provided, context, 'I don't have information on that', or anything that breaks the illusion that you're two real people having a conversation. "
+        "NEVER refuse to answer. Always give the student something useful. "
+        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format.\n\n"
+        f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
+    if podcast_script:
+        # Include last portion of script for context on what was being discussed
+        script_tail = podcast_script[-4000:] if len(podcast_script) > 4000 else podcast_script
+        system_prompt += f"RECENT PODCAST CONTEXT (what was being discussed when the student paused):\n\n{script_tail}"
 
     ai_client = anthropic.Anthropic()
     ai_response = ai_client.messages.create(
@@ -317,20 +348,36 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
 
     answer_text = ai_response.content[0].text
 
-    # Step 4: TTS
+    # Step 4: Multi-speaker TTS matching podcast voices
+    tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{answer_text}"
+
     audio_response_b64 = None
     async with httpx.AsyncClient() as client:
         tts_response = await client.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
             json={
-                "contents": [{"parts": [{"text": answer_text}]}],
+                "contents": [{"role": "user", "parts": [{"text": tts_prompt}]}],
                 "generationConfig": {
-                    "response_modalities": ["AUDIO"],
-                    "speech_config": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {"voiceName": "Kore"}
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "multiSpeakerVoiceConfig": {
+                            "speakerVoiceConfigs": [
+                                {
+                                    "speaker": speaker_a,
+                                    "voiceConfig": {
+                                        "prebuiltVoiceConfig": {"voiceName": "Kore"}
+                                    }
+                                },
+                                {
+                                    "speaker": speaker_b,
+                                    "voiceConfig": {
+                                        "prebuiltVoiceConfig": {"voiceName": "Puck"}
+                                    }
+                                }
+                            ]
                         }
-                    }
+                    },
+                    "temperature": 2.0,
                 }
             },
             timeout=60.0,
