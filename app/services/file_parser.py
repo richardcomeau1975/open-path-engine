@@ -81,6 +81,8 @@ PARSERS = {
     ".xlsx": parse_xlsx,
     ".txt": parse_text,
     ".md": parse_text,
+    ".yaml": parse_text,
+    ".yml": parse_text,
 }
 
 
