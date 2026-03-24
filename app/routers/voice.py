@@ -250,11 +250,34 @@ async def voice_walkthrough_message(topic_id: str, request: Request, student: di
     }
 
 
+# ── Filler audio endpoint ────────────────────────────────────────
+
+@router.get("/podcast/filler-urls")
+async def get_filler_urls(student: dict = Depends(get_current_student)):
+    """Return presigned URLs for all 16 filler audio clips."""
+    from app.services.r2 import generate_presigned_url
+    categories = ["a", "b", "c", "d"]
+    fillers = []
+    for cat in categories:
+        for i in range(1, 5):
+            key = f"filler_audio/category_{cat}_{i}.wav"
+            try:
+                url = generate_presigned_url(key)
+                fillers.append({"key": key, "category": cat, "index": i, "url": url})
+            except:
+                pass
+    return {"fillers": fillers}
+
+
+# ── Podcast Q&A ──────────────────────────────────────────────────
+
 @router.post("/podcast/{topic_id}/ask")
 async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
     body = await request.json()
     audio_b64 = body.get("audio")
     text_question = body.get("text")
+    paused_at = body.get("pausedAt", 0)  # seconds into the podcast
+    history = body.get("history", [])  # previous Q&A exchanges
 
     supabase = get_supabase()
 
@@ -281,7 +304,7 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
     if not question or not question.strip():
         return {"transcript": "", "answer": "", "audio": None}
 
-    # Step 2: Get learning asset
+    # Step 2: Load learning asset + podcast script
     topic = supabase.table("topics") \
         .select("learning_asset_url, podcast_script_url, course_id") \
         .eq("id", topic_id) \
@@ -298,8 +321,6 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
         except:
             pass
 
-    # Step 3: Answer with Sonnet — in character as the podcast hosts
-    # Also load the podcast script for context on what they were discussing
     podcast_script = ""
     if topic.data[0].get("podcast_script_url"):
         try:
@@ -311,6 +332,7 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
     # Detect speaker names from script
     speaker_a = "HOST A"
     speaker_b = "HOST B"
+    last_speaker_at_pause = speaker_a
     for line in podcast_script.split("\n")[:20]:
         line = line.strip()
         if ":" in line:
@@ -322,6 +344,30 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
                     speaker_b = name
                     break
 
+    # Step 3: Use pausedAt to find relevant script section
+    # ~150 words per minute spoken, ~6 chars per word = ~900 chars per minute
+    script_context = ""
+    if podcast_script and paused_at > 0:
+        chars_per_second = 900 / 60  # ~15 chars/sec
+        estimated_position = int(paused_at * chars_per_second)
+        start = max(0, estimated_position - 1000)
+        end = min(len(podcast_script), estimated_position + 500)
+        script_context = podcast_script[start:end]
+
+        # Figure out which speaker was likely talking at pause point
+        # Look at the last speaker line before the estimated position
+        text_before = podcast_script[:estimated_position]
+        for line in reversed(text_before.split("\n")):
+            line = line.strip()
+            if ":" in line:
+                name = line.split(":")[0].strip()
+                if name == speaker_a or name == speaker_b:
+                    last_speaker_at_pause = name
+                    break
+    elif podcast_script:
+        script_context = podcast_script[-2000:] if len(podcast_script) > 2000 else podcast_script
+
+    # Step 4: Build system prompt with prompt caching
     system_prompt = (
         f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
         "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
@@ -330,25 +376,36 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
         "If you genuinely don't know, say something like 'honestly that's a great question, I think it connects to...' and bridge to something you do know. "
         "NEVER say: learning asset, system, material provided, context, 'I don't have information on that', or anything that breaks the illusion that you're two real people having a conversation. "
         "NEVER refuse to answer. Always give the student something useful. "
-        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format.\n\n"
+        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format. "
+        "Don't start with a filler reaction — the student already heard one. Jump straight into the substantive answer.\n\n"
         f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
-    if podcast_script:
-        # Include last portion of script for context on what was being discussed
-        script_tail = podcast_script[-4000:] if len(podcast_script) > 4000 else podcast_script
-        system_prompt += f"RECENT PODCAST CONTEXT (what was being discussed when the student paused):\n\n{script_tail}"
+    if script_context:
+        system_prompt += f"WHAT WAS BEING DISCUSSED WHEN THE STUDENT PAUSED:\n\n{script_context}"
 
+    # Step 5: Build messages with conversation history
+    api_messages = []
+    for msg in history:
+        if msg.get("role") and msg.get("content"):
+            api_messages.append({"role": msg["role"], "content": msg["content"]})
+    api_messages.append({"role": "user", "content": question})
+
+    # Step 6: Call Sonnet with prompt caching (#6)
     ai_client = anthropic.Anthropic()
     ai_response = ai_client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": question}],
+        max_tokens=2048,  # (#2) bumped from 1024
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"}  # (#6) prompt caching
+        }],
+        messages=api_messages,
     )
 
     answer_text = ai_response.content[0].text
 
-    # Step 4: Multi-speaker TTS matching podcast voices
+    # Step 7: Multi-speaker TTS matching podcast voices
     tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{answer_text}"
 
     audio_response_b64 = None
@@ -380,7 +437,7 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
                     "temperature": 2.0,
                 }
             },
-            timeout=60.0,
+            timeout=120.0,
         )
 
     try:
@@ -392,4 +449,5 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
         "transcript": question,
         "answer": answer_text,
         "audio": audio_response_b64,
+        "last_speaker": last_speaker_at_pause,  # (#8) helps frontend pick filler
     }
