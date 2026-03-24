@@ -63,6 +63,22 @@ async def get_topic_content(topic_id: str, request: Request, student: dict = Dep
 
     if topic.get("visual_overview_script_url"):
         content["visual_overview_script"] = generate_presigned_url(topic["visual_overview_script_url"])
+        # Parse script to extract slide metadata (anchor_text etc.)
+        try:
+            script_raw = download_from_r2(topic["visual_overview_script_url"]).decode("utf-8")
+            script_clean = script_raw.strip()
+            if script_clean.startswith("```"):
+                script_clean = script_clean[script_clean.index("\n") + 1:]
+            if script_clean.endswith("```"):
+                script_clean = script_clean[:-3]
+            import json as _json
+            slides = _json.loads(script_clean.strip())
+            content["visual_overview_slides"] = [
+                {"slide_number": s.get("slide_number", i + 1), "anchor_text": s.get("anchor_text", "")}
+                for i, s in enumerate(slides)
+            ]
+        except Exception:
+            pass  # Graceful fallback — old scripts may not parse
 
     # Image arrays
     images = topic.get("visual_overview_images") or []
