@@ -35,33 +35,46 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     script_text = download_from_r2(topic["podcast_script_url"]).decode("utf-8")
     logger.info(f"Podcast audio [{topic_id}] — loaded script ({len(script_text)} chars)")
 
-    # Check script length — Gemini TTS has input limits (~5000 chars recommended)
-    # If the script is very long, we may need to chunk it later.
-    # For now, if it exceeds 30000 chars, truncate with a warning.
-    if len(script_text) > 30000:
-        logger.warning(f"Podcast audio [{topic_id}] — script is {len(script_text)} chars, truncating to 30000")
-        script_text = script_text[:30000]
-
     # Parse speaker names from the script
-    # The podcast generator uses HOST: and EXPERT: labels
-    # Detect the actual speaker names used
     speaker_a = "Host"
     speaker_b = "Expert"
     for line in script_text.split("\n")[:20]:
         line = line.strip()
         if ":" in line:
-            name = line.split(":")[0].strip().upper()
-            if name and len(name) < 30:
+            name = line.split(":")[0].strip()
+            if name and len(name) < 30 and not name.startswith("["):
                 if speaker_a == "Host":
-                    speaker_a = line.split(":")[0].strip()
-                elif line.split(":")[0].strip() != speaker_a:
-                    speaker_b = line.split(":")[0].strip()
+                    speaker_a = name
+                elif name != speaker_a:
+                    speaker_b = name
                     break
 
     logger.info(f"Podcast audio [{topic_id}] — detected speakers: {speaker_a}, {speaker_b}")
 
-    # Generate audio
-    wav_data = await generate_multi_speaker_audio(script_text, speaker_a, speaker_b)
+    # Chunk the script to avoid Gemini TTS ~10min output limit per call.
+    # Split at natural speaker-line boundaries, ~8000 chars per chunk.
+    CHUNK_SIZE = 8000
+    chunks = _chunk_script(script_text, CHUNK_SIZE)
+    logger.info(f"Podcast audio [{topic_id}] — split into {len(chunks)} chunks")
+
+    # Generate audio for each chunk and concatenate
+    all_pcm = bytearray()
+    for i, chunk in enumerate(chunks):
+        logger.info(f"Podcast audio [{topic_id}] — generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
+        wav_data = await generate_multi_speaker_audio(chunk, speaker_a, speaker_b)
+        # Extract PCM from WAV (skip 44-byte header)
+        all_pcm.extend(wav_data[44:])
+
+    # Wrap concatenated PCM in a single WAV
+    import io, wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes(bytes(all_pcm))
+    wav_data = buf.getvalue()
+    logger.info(f"Podcast audio [{topic_id}] — total audio: {len(wav_data)} bytes ({len(all_pcm) / 24000 / 2:.0f}s)")
 
     # Store on R2
     r2_key = f"{topic_id}/podcast_audio.wav"
@@ -74,3 +87,32 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     }).eq("id", topic_id).execute()
 
     return r2_key
+
+
+def _chunk_script(script_text: str, max_chars: int = 8000) -> list[str]:
+    """
+    Split a podcast script into chunks at speaker-line boundaries.
+    Each chunk stays under max_chars. Preserves complete speaker turns.
+    """
+    lines = script_text.split("\n")
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    for line in lines:
+        line_len = len(line) + 1  # +1 for newline
+        if current_len + line_len > max_chars and current_chunk:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = []
+            current_len = 0
+        current_chunk.append(line)
+        current_len += line_len
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    # If script is short enough for one chunk, return as-is
+    if not chunks:
+        chunks = [script_text]
+
+    return chunks
