@@ -77,7 +77,7 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
                 },
                 json={
                     "model": "gpt-image-1",
-                    "prompt": f"Editorial illustration in warm watercolor and ink sketch style on a cream off-white background. Lots of white space. Human figures with expressive body language and emotion. Gentle muted color palette with warm grays, soft earth tones, and one subtle accent color. Style of newspaper editorial illustrations. No text, no labels, no diagrams, no icons, no clipart, no speech bubbles. Scene: {image_prompt}",
+                    "prompt": f"Minimal pen and ink line drawing on cream paper. Thin clean black ink outlines only. Extremely sparse composition — most of the image is empty cream off-white background. Only the faintest hint of color as a very light watercolor wash on one or two small elements like clothing. No filled backgrounds. No heavy color. No painting. No watercolor washes covering large areas. Figures and objects float on cream paper with abundant negative space. The figure or scene should be positioned in the lower portion of the frame, leaving the top third mostly empty cream space. Simple clean editorial sketch style like a New Yorker spot illustration. Scene: {image_prompt}",
                     "n": 1,
                     "size": "1536x1024",
                     "quality": "medium",
