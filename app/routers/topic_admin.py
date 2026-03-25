@@ -4,6 +4,7 @@ Allows admins to create topics, inspect output status, upload/delete outputs,
 generate individual outputs (with real or test prompts), and trigger downstream generation.
 """
 
+import asyncio
 import uuid
 import logging
 from typing import Optional
@@ -461,22 +462,24 @@ async def generate_admin_output(
     output_type: str,
     student: dict = Depends(require_admin_student),
 ):
-    """Generate ONE output using the real system prompt (direct Claude call, not batch)."""
+    """Generate ONE output in the background. Returns immediately."""
     _validate_output_type(output_type)
     sb = get_supabase()
     _get_topic_or_404(sb, topic_id)
 
-    if output_type in TEXT_OUTPUT_TYPES:
-        result_text = await _generate_text_output(topic_id, output_type, sb, student)
-        return {
-            "output_type": output_type,
-            "status": "success",
-            "length": len(result_text),
-        }
+    async def _bg():
+        try:
+            bg_sb = get_supabase()
+            if output_type in TEXT_OUTPUT_TYPES:
+                await _generate_text_output(topic_id, output_type, bg_sb, student)
+            else:
+                await _generate_media_output(topic_id, output_type, bg_sb)
+            logger.info(f"admin generate [{topic_id}] — {output_type} completed")
+        except Exception as e:
+            logger.error(f"admin generate [{topic_id}] — {output_type} failed: {e}")
 
-    else:
-        result = await _generate_media_output(topic_id, output_type, sb)
-        return result
+    asyncio.create_task(_bg())
+    return {"output_type": output_type, "status": "started"}
 
 
 # ---------------------------------------------------------------------------
@@ -541,24 +544,24 @@ async def generate_test_output(
         model = "claude-sonnet-4-20250514"
         max_tokens = 8192
 
-    result_text = await _call_claude(full_prompt, model=model, max_tokens=max_tokens)
+    async def _bg_test():
+        try:
+            bg_sb = get_supabase()
+            result_text = await _call_claude(full_prompt, model=model, max_tokens=max_tokens)
+            if output_type == "learning_asset":
+                await store_learning_asset_result(topic_id, bg_sb, result_text)
+            elif output_type == "podcast_script":
+                await store_podcast_script_result(topic_id, bg_sb, result_text)
+            elif output_type == "notechart":
+                await store_notechart_result(topic_id, bg_sb, result_text)
+            elif output_type == "visual_overview_script":
+                await store_visual_overview_result(topic_id, bg_sb, result_text)
+            logger.info(f"admin generate-test [{topic_id}] — {output_type} completed ({len(result_text)} chars)")
+        except Exception as e:
+            logger.error(f"admin generate-test [{topic_id}] — {output_type} failed: {e}")
 
-    # Store result using the standard store function
-    if output_type == "learning_asset":
-        await store_learning_asset_result(topic_id, sb, result_text)
-    elif output_type == "podcast_script":
-        await store_podcast_script_result(topic_id, sb, result_text)
-    elif output_type == "notechart":
-        await store_notechart_result(topic_id, sb, result_text)
-    elif output_type == "visual_overview_script":
-        await store_visual_overview_result(topic_id, sb, result_text)
-
-    return {
-        "output_type": output_type,
-        "status": "success",
-        "length": len(result_text),
-        "model": model,
-    }
+    asyncio.create_task(_bg_test())
+    return {"output_type": output_type, "status": "started", "model": model}
 
 
 # ---------------------------------------------------------------------------
@@ -606,30 +609,19 @@ async def generate_downstream(
     _get_topic_or_404(sb, topic_id)
 
     steps = DOWNSTREAM_MAP[output_type]
-    results = []
 
-    for step in steps:
-        try:
-            if step in TEXT_OUTPUT_TYPES:
-                result_text = await _generate_text_output(topic_id, step, sb, student)
-                results.append({
-                    "type": step,
-                    "status": "success",
-                    "length": len(result_text),
-                })
-            else:
-                result = await _generate_media_output(topic_id, step, sb)
-                results.append(result)
+    async def _bg_downstream():
+        bg_sb = get_supabase()
+        for step in steps:
+            try:
+                if step in TEXT_OUTPUT_TYPES:
+                    await _generate_text_output(topic_id, step, bg_sb, student)
+                else:
+                    await _generate_media_output(topic_id, step, bg_sb)
+                logger.info(f"generate-from [{topic_id}] — step '{step}' completed")
+            except Exception as e:
+                logger.error(f"generate-from [{topic_id}] — step '{step}' failed: {e}")
+                # Continue with remaining steps
 
-        except Exception as e:
-            logger.error(f"generate-from [{topic_id}] — step '{step}' failed: {e}")
-            results.append({
-                "type": step,
-                "status": "error",
-                "error": str(e),
-            })
-
-    return {
-        "source_type": output_type,
-        "steps": results,
-    }
+    asyncio.create_task(_bg_downstream())
+    return {"source_type": output_type, "status": "started", "steps": steps}
