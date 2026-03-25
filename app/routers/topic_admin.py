@@ -588,6 +588,33 @@ DOWNSTREAM_MAP = {
 }
 
 
+@router.delete("/topics/{topic_id}/admin/clear-from/{output_type}")
+async def clear_downstream(
+    topic_id: str,
+    output_type: str,
+    student: dict = Depends(require_admin_student),
+):
+    """Clear all downstream outputs from the given type (inclusive)."""
+    if output_type not in DOWNSTREAM_MAP:
+        raise HTTPException(status_code=400, detail=f"No downstream map for '{output_type}'")
+
+    sb = get_supabase()
+    _get_topic_or_404(sb, topic_id)
+
+    to_clear = DOWNSTREAM_MAP[output_type]
+    cleared = []
+
+    for step in to_clear:
+        col = COLUMN_MAP[step]
+        if step in ARRAY_COLUMNS:
+            sb.table("topics").update({col: []}).eq("id", topic_id).execute()
+        else:
+            sb.table("topics").update({col: None}).eq("id", topic_id).execute()
+        cleared.append(step)
+
+    return {"cleared": cleared}
+
+
 @router.post("/topics/{topic_id}/admin/generate-from/{output_type}")
 async def generate_downstream(
     topic_id: str,
