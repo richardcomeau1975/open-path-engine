@@ -58,6 +58,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["topic-admin"])
 
 # ---------------------------------------------------------------------------
+# In-memory generation progress tracker
+# ---------------------------------------------------------------------------
+# Keyed by topic_id. Each entry: { "steps": [...], "current": "step_name", "status": "running"/"done"/"failed", "error": "" }
+_generation_progress = {}
+
+
+def _set_progress(topic_id: str, steps: list, current: str = None, status: str = "running", error: str = ""):
+    _generation_progress[topic_id] = {
+        "steps": steps,
+        "current": current,
+        "status": status,
+        "error": error,
+    }
+
+
+def _update_step_status(topic_id: str, step: str, step_status: str, error: str = ""):
+    if topic_id in _generation_progress:
+        entry = _generation_progress[topic_id]
+        for s in entry["steps"]:
+            if s["name"] == step:
+                s["status"] = step_status
+                if error:
+                    s["error"] = error
+                break
+        if step_status == "running":
+            entry["current"] = step
+
+
+def _clear_progress(topic_id: str):
+    _generation_progress.pop(topic_id, None)
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -343,6 +375,22 @@ async def get_admin_topic_status(
 
 
 # ---------------------------------------------------------------------------
+# 2a. GET /api/topics/{id}/admin/progress — generation progress
+# ---------------------------------------------------------------------------
+
+@router.get("/topics/{topic_id}/admin/progress")
+async def get_generation_progress(
+    topic_id: str,
+    student: dict = Depends(require_admin_student),
+):
+    """Return in-flight generation progress for a topic."""
+    progress = _generation_progress.get(topic_id)
+    if not progress:
+        return {"active": False}
+    return {"active": True, **progress}
+
+
+# ---------------------------------------------------------------------------
 # 2b. GET /api/topics/{id}/admin/view/{type}
 # ---------------------------------------------------------------------------
 
@@ -475,6 +523,8 @@ async def generate_admin_output(
     sb = get_supabase()
     _get_topic_or_404(sb, topic_id)
 
+    _set_progress(topic_id, [{"name": output_type, "status": "running", "error": ""}], current=output_type)
+
     async def _bg():
         try:
             bg_sb = get_supabase()
@@ -482,8 +532,13 @@ async def generate_admin_output(
                 await _generate_text_output(topic_id, output_type, bg_sb, student)
             else:
                 await _generate_media_output(topic_id, output_type, bg_sb)
+            _update_step_status(topic_id, output_type, "done")
+            _generation_progress[topic_id]["status"] = "done"
+            _generation_progress[topic_id]["current"] = None
             logger.info(f"admin generate [{topic_id}] — {output_type} completed")
         except Exception as e:
+            _update_step_status(topic_id, output_type, "failed", str(e))
+            _generation_progress[topic_id]["status"] = "failed"
             logger.error(f"admin generate [{topic_id}] — {output_type} failed: {e}")
 
     asyncio.create_task(_bg())
@@ -645,6 +700,10 @@ async def generate_downstream(
 
     steps = DOWNSTREAM_MAP[output_type]
 
+    # Initialize progress tracking
+    step_list = [{"name": s, "status": "pending", "error": ""} for s in steps]
+    _set_progress(topic_id, step_list, status="running")
+
     async def _bg_downstream():
         bg_sb = get_supabase()
         topic = _get_topic_or_404(bg_sb, topic_id)
@@ -656,6 +715,8 @@ async def generate_downstream(
 
         # ── BATCH TEXT STEPS (50% cheaper) ──────────────────────
         if len(text_steps) > 1:
+            for s in text_steps:
+                _update_step_status(topic_id, s, "running")
             try:
                 upstream = await _read_upstream_text(topic_id, "podcast_script", bg_sb)
 
@@ -701,46 +762,67 @@ async def generate_downstream(
                             await store_notechart_result(topic_id, bg_sb, text)
                         elif step == "visual_overview_script":
                             await store_visual_overview_result(topic_id, bg_sb, text)
+                        _update_step_status(topic_id, step, "done")
                         logger.info(f"generate-from [{topic_id}] — {step} completed ({len(text)} chars)")
                     else:
+                        _update_step_status(topic_id, step, "failed", "No result from batch")
                         logger.error(f"generate-from [{topic_id}] — {step} failed in batch")
 
             except Exception as e:
+                for s in text_steps:
+                    _update_step_status(topic_id, s, "failed", str(e))
                 logger.error(f"generate-from [{topic_id}] — batch text generation failed: {e}")
 
         elif len(text_steps) == 1:
             step = text_steps[0]
+            _update_step_status(topic_id, step, "running")
             try:
                 await _generate_text_output(topic_id, step, bg_sb, student)
+                _update_step_status(topic_id, step, "done")
                 logger.info(f"generate-from [{topic_id}] — {step} completed")
             except Exception as e:
+                _update_step_status(topic_id, step, "failed", str(e))
                 logger.error(f"generate-from [{topic_id}] — {step} failed: {e}")
 
         # ── MEDIA STEPS ─────────────────────────────────────────
         if media_steps:
             if "visual_overview_images" in media_steps:
+                _update_step_status(topic_id, "visual_overview_images", "running")
                 try:
                     await _generate_media_output(topic_id, "visual_overview_images", bg_sb)
+                    _update_step_status(topic_id, "visual_overview_images", "done")
                     logger.info(f"generate-from [{topic_id}] — visual_overview_images completed")
                 except Exception as e:
+                    _update_step_status(topic_id, "visual_overview_images", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — visual_overview_images failed: {e}")
 
             if "podcast_audio" in media_steps:
+                _update_step_status(topic_id, "podcast_audio", "running")
                 try:
                     await _generate_media_output(topic_id, "podcast_audio", bg_sb)
+                    _update_step_status(topic_id, "podcast_audio", "done")
                     logger.info(f"generate-from [{topic_id}] — podcast_audio completed")
                 except Exception as e:
+                    _update_step_status(topic_id, "podcast_audio", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
 
             if "narration_audio" in media_steps:
                 if "podcast_audio" in media_steps:
                     logger.info(f"generate-from [{topic_id}] — waiting 10s between TTS generators")
                     await asyncio.sleep(10)
+                _update_step_status(topic_id, "narration_audio", "running")
                 try:
                     await _generate_media_output(topic_id, "narration_audio", bg_sb)
+                    _update_step_status(topic_id, "narration_audio", "done")
                     logger.info(f"generate-from [{topic_id}] — narration_audio completed")
                 except Exception as e:
+                    _update_step_status(topic_id, "narration_audio", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — narration_audio failed: {e}")
+
+        # Mark overall progress as done
+        if topic_id in _generation_progress:
+            _generation_progress[topic_id]["status"] = "done"
+            _generation_progress[topic_id]["current"] = None
 
     asyncio.create_task(_bg_downstream())
     return {"source_type": output_type, "status": "started", "steps": steps}
