@@ -4,6 +4,7 @@ Reads podcast script from R2, generates multi-speaker audio via Gemini TTS,
 stores WAV on R2.
 """
 
+import asyncio
 import logging
 from app.services.r2 import download_from_r2, upload_bytes_to_r2
 from app.services.generators.tts import generate_multi_speaker_audio
@@ -60,6 +61,9 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     # Generate audio for each chunk and concatenate
     all_pcm = bytearray()
     for i, chunk in enumerate(chunks):
+        if i > 0:
+            logger.info(f"Podcast audio [{topic_id}] — waiting 7s for TTS rate limit")
+            await asyncio.sleep(7)
         logger.info(f"Podcast audio [{topic_id}] — generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
         wav_data = await generate_multi_speaker_audio(chunk, speaker_a, speaker_b)
         # Extract PCM from WAV (skip 44-byte header)

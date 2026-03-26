@@ -177,9 +177,10 @@ async def _read_upstream_text(topic_id: str, output_type: str, sb) -> str:
 
 
 async def _call_claude(prompt: str, model: str, max_tokens: int) -> str:
-    """Call Claude synchronously (not batch) and return the text response."""
+    """Call Claude via asyncio.to_thread so it doesn't block the event loop."""
     client = anthropic.Anthropic()
-    response = client.messages.create(
+    response = await asyncio.to_thread(
+        client.messages.create,
         model=model,
         max_tokens=max_tokens,
         messages=[{"role": "user", "content": prompt}],
