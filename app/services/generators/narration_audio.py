@@ -4,6 +4,7 @@ Reads visual overview script, generates per-slide narration via Gemini TTS (sing
 stores WAV files on R2.
 """
 
+import asyncio
 import json
 import logging
 from app.services.r2 import download_from_r2, upload_bytes_to_r2
@@ -60,6 +61,9 @@ async def generate_narration_audio(topic_id: str, supabase_client) -> list[str]:
         if not narration:
             logger.warning(f"Narration audio [{topic_id}] — slide {slide_num} has no narration, skipping")
             continue
+
+        if audio_keys:  # Not the first slide
+            await asyncio.sleep(7)
 
         logger.info(f"Narration audio [{topic_id}] — generating audio for slide {slide_num}")
 

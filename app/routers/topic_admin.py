@@ -31,15 +31,22 @@ from app.services.generators.learning_asset import (
 from app.services.generators.podcast_script import (
     build_podcast_script_prompt,
     store_podcast_script_result,
+    MODEL as PS_MODEL,
+    MAX_TOKENS as PS_MAX_TOKENS,
 )
 from app.services.generators.notechart import (
     build_notechart_prompt,
     store_notechart_result,
+    MODEL as NC_MODEL,
+    MAX_TOKENS as NC_MAX_TOKENS,
 )
 from app.services.generators.visual_overview import (
     build_visual_overview_prompt,
     store_visual_overview_result,
+    MODEL as VO_MODEL,
+    MAX_TOKENS as VO_MAX_TOKENS,
 )
+from app.services.batch_api import run_anthropic_batch
 
 # Media generators
 from app.services.generators.images import generate_images
@@ -640,16 +647,100 @@ async def generate_downstream(
 
     async def _bg_downstream():
         bg_sb = get_supabase()
-        for step in steps:
+        topic = _get_topic_or_404(bg_sb, topic_id)
+        course_id = topic.get("course_id")
+        student_id = student.get("id")
+
+        text_steps = [s for s in steps if s in TEXT_OUTPUT_TYPES]
+        media_steps = [s for s in steps if s in MEDIA_OUTPUT_TYPES]
+
+        # ── BATCH TEXT STEPS (50% cheaper) ──────────────────────
+        if len(text_steps) > 1:
             try:
-                if step in TEXT_OUTPUT_TYPES:
-                    await _generate_text_output(topic_id, step, bg_sb, student)
-                else:
-                    await _generate_media_output(topic_id, step, bg_sb)
-                logger.info(f"generate-from [{topic_id}] — step '{step}' completed")
+                upstream = await _read_upstream_text(topic_id, "podcast_script", bg_sb)
+
+                batch_requests = []
+                for step in text_steps:
+                    if step == "podcast_script":
+                        prompt = await build_podcast_script_prompt(
+                            topic_id, bg_sb, upstream,
+                            student_id=student_id, course_id=course_id,
+                        )
+                        batch_requests.append({
+                            "custom_id": step, "model": PS_MODEL,
+                            "max_tokens": PS_MAX_TOKENS, "prompt": prompt,
+                        })
+                    elif step == "notechart":
+                        prompt = await build_notechart_prompt(
+                            topic_id, bg_sb, upstream,
+                            student_id=student_id, course_id=course_id,
+                        )
+                        batch_requests.append({
+                            "custom_id": step, "model": NC_MODEL,
+                            "max_tokens": NC_MAX_TOKENS, "prompt": prompt,
+                        })
+                    elif step == "visual_overview_script":
+                        prompt = await build_visual_overview_prompt(
+                            topic_id, bg_sb, upstream,
+                            student_id=student_id, course_id=course_id,
+                        )
+                        batch_requests.append({
+                            "custom_id": step, "model": VO_MODEL,
+                            "max_tokens": VO_MAX_TOKENS, "prompt": prompt,
+                        })
+
+                logger.info(f"generate-from [{topic_id}] — batching {len(batch_requests)} Sonnet calls")
+                results = await run_anthropic_batch(batch_requests)
+
+                for step in text_steps:
+                    text = results.get(step)
+                    if text:
+                        if step == "podcast_script":
+                            await store_podcast_script_result(topic_id, bg_sb, text)
+                        elif step == "notechart":
+                            await store_notechart_result(topic_id, bg_sb, text)
+                        elif step == "visual_overview_script":
+                            await store_visual_overview_result(topic_id, bg_sb, text)
+                        logger.info(f"generate-from [{topic_id}] — {step} completed ({len(text)} chars)")
+                    else:
+                        logger.error(f"generate-from [{topic_id}] — {step} failed in batch")
+
             except Exception as e:
-                logger.error(f"generate-from [{topic_id}] — step '{step}' failed: {e}")
-                # Continue with remaining steps
+                logger.error(f"generate-from [{topic_id}] — batch text generation failed: {e}")
+
+        elif len(text_steps) == 1:
+            step = text_steps[0]
+            try:
+                await _generate_text_output(topic_id, step, bg_sb, student)
+                logger.info(f"generate-from [{topic_id}] — {step} completed")
+            except Exception as e:
+                logger.error(f"generate-from [{topic_id}] — {step} failed: {e}")
+
+        # ── MEDIA STEPS ─────────────────────────────────────────
+        if media_steps:
+            if "visual_overview_images" in media_steps:
+                try:
+                    await _generate_media_output(topic_id, "visual_overview_images", bg_sb)
+                    logger.info(f"generate-from [{topic_id}] — visual_overview_images completed")
+                except Exception as e:
+                    logger.error(f"generate-from [{topic_id}] — visual_overview_images failed: {e}")
+
+            if "podcast_audio" in media_steps:
+                try:
+                    await _generate_media_output(topic_id, "podcast_audio", bg_sb)
+                    logger.info(f"generate-from [{topic_id}] — podcast_audio completed")
+                except Exception as e:
+                    logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
+
+            if "narration_audio" in media_steps:
+                if "podcast_audio" in media_steps:
+                    logger.info(f"generate-from [{topic_id}] — waiting 10s between TTS generators")
+                    await asyncio.sleep(10)
+                try:
+                    await _generate_media_output(topic_id, "narration_audio", bg_sb)
+                    logger.info(f"generate-from [{topic_id}] — narration_audio completed")
+                except Exception as e:
+                    logger.error(f"generate-from [{topic_id}] — narration_audio failed: {e}")
 
     asyncio.create_task(_bg_downstream())
     return {"source_type": output_type, "status": "started", "steps": steps}
