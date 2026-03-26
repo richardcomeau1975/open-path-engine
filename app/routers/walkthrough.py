@@ -62,14 +62,21 @@ async def start_session(topic_id: str, request: Request, student: dict = Depends
         return {"session": result.data[0]}
 
     # Create new session
-    result = supabase.table("walkthrough_sessions").insert({
+    session_data = {
         "topic_id": topic_id,
         "student_id": student["id"],
         "mode": mode,
         "cluster": cluster,
         "messages": [],
         "is_active": True,
-    }).execute()
+    }
+
+    # Admin can provide a test prompt for this session
+    test_prompt = body.get("test_prompt")
+    if test_prompt and student.get("is_admin"):
+        session_data["metadata"] = {"test_prompt": test_prompt}
+
+    result = supabase.table("walkthrough_sessions").insert(session_data).execute()
 
     return {"session": result.data[0]}
 
@@ -104,8 +111,14 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
     framework_type = course.data[0].get("framework_type") if course.data else None
     course_id = topic.data[0]["course_id"]
 
-    # Build the system prompt
-    base_prompt = get_prompt_for_feature("walkthrough_tutor", framework_type)
+    # Use test prompt if stored in session, otherwise use the real prompt
+    session_metadata = session.get("metadata") or {}
+    test_prompt = session_metadata.get("test_prompt")
+
+    if test_prompt:
+        base_prompt = test_prompt
+    else:
+        base_prompt = get_prompt_for_feature("walkthrough_tutor", framework_type)
 
     modifier_text = gather_modifiers(
         feature="walkthrough_tutor",
