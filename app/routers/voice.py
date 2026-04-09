@@ -550,3 +550,199 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
         "audio": audio_response_b64,
         "last_speaker": last_speaker_at_pause,  # (#8) helps frontend pick filler
     }
+
+
+# ── Streaming Q&A with progressive TTS ──────────────────────────
+
+def _split_into_speaker_chunks(text: str) -> list:
+    """Split dialogue into chunks of 2-3 speaker turns each for progressive TTS."""
+    lines = text.strip().split("\n")
+    chunks = []
+    current_chunk = []
+    speaker_turns_in_chunk = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        is_speaker_line = ":" in stripped and len(stripped.split(":")[0]) < 30
+        if is_speaker_line:
+            speaker_turns_in_chunk += 1
+            if speaker_turns_in_chunk > 2 and current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = []
+                speaker_turns_in_chunk = 1
+        current_chunk.append(line)
+
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+    return chunks
+
+
+@router.post("/podcast/{topic_id}/ask-stream")
+async def podcast_ask_stream(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
+    """Podcast Q&A with progressive TTS — streams audio chunks as they're generated."""
+    body = await request.json()
+    audio_b64 = body.get("audio")
+    text_question = body.get("text")
+    paused_at = body.get("pausedAt", 0)
+    history = body.get("history", [])
+
+    supabase = get_supabase()
+
+    # Get question text
+    question = text_question
+    if audio_b64 and not question:
+        audio_bytes = base64.b64decode(audio_b64)
+        async with httpx.AsyncClient() as client:
+            stt_response = await client.post(
+                "https://api.deepgram.com/v1/listen",
+                params={"model": "nova-3", "smart_format": "true", "language": "en"},
+                headers={
+                    "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
+                    "Content-Type": "audio/webm",
+                },
+                content=audio_bytes,
+                timeout=30.0,
+            )
+        try:
+            question = stt_response.json()["results"]["channels"][0]["alternatives"][0]["transcript"]
+        except (KeyError, IndexError):
+            raise HTTPException(502, "Transcription failed")
+
+    if not question or not question.strip():
+        return {"transcript": "", "answer": "", "audio": None}
+
+    # Load context (same as existing endpoint)
+    topic = supabase.table("topics") \
+        .select("learning_asset_url, podcast_script_url, course_id") \
+        .eq("id", topic_id) \
+        .execute()
+
+    if not topic.data:
+        raise HTTPException(404, "Topic not found")
+
+    learning_asset = ""
+    if topic.data[0].get("learning_asset_url"):
+        try:
+            learning_asset = download_from_r2(topic.data[0]["learning_asset_url"]).decode("utf-8")
+        except:
+            pass
+
+    podcast_script = ""
+    if topic.data[0].get("podcast_script_url"):
+        try:
+            podcast_script = download_from_r2(topic.data[0]["podcast_script_url"]).decode("utf-8")
+        except:
+            pass
+
+    # Detect speakers
+    speaker_a = "HOST A"
+    speaker_b = "HOST B"
+    for line in podcast_script.split("\n")[:20]:
+        line = line.strip()
+        if ":" in line:
+            name = line.split(":")[0].strip()
+            if name and len(name) < 30 and not name.startswith("["):
+                if speaker_a == "HOST A":
+                    speaker_a = name
+                elif name != speaker_a:
+                    speaker_b = name
+                    break
+
+    # Script context around pause
+    script_context = ""
+    if podcast_script and paused_at > 0:
+        chars_per_second = 900 / 60
+        estimated_position = int(paused_at * chars_per_second)
+        start = max(0, estimated_position - 1000)
+        end = min(len(podcast_script), estimated_position + 500)
+        script_context = podcast_script[start:end]
+    elif podcast_script:
+        script_context = podcast_script[-2000:] if len(podcast_script) > 2000 else podcast_script
+
+    # System prompt
+    system_prompt = (
+        f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
+        "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
+        "Answer the question naturally as part of the conversation. You know this material deeply. "
+        "If the question is about something tangential, connect it back to what you were discussing. "
+        "If you genuinely don't know, say something like 'honestly that's a great question, I think it connects to...' and bridge to something you do know. "
+        "NEVER say: learning asset, system, material provided, context, 'I don't have information on that', or anything that breaks the illusion that you're two real people having a conversation. "
+        "NEVER refuse to answer. Always give the student something useful. "
+        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format. "
+        "Don't start with a filler reaction — the student already heard one. Jump straight into the substantive answer.\n\n"
+        f"LEARNING ASSET:\n\n{learning_asset}\n\n"
+    )
+    if script_context:
+        system_prompt += f"WHAT WAS BEING DISCUSSED WHEN THE STUDENT PAUSED:\n\n{script_context}"
+
+    # Messages with history
+    api_messages = []
+    for msg in history:
+        if msg.get("role") and msg.get("content"):
+            api_messages.append({"role": msg["role"], "content": msg["content"]})
+    api_messages.append({"role": "user", "content": question})
+
+    # Get full Claude response
+    ai_client = anthropic.Anthropic()
+    ai_response = await asyncio.to_thread(
+        ai_client.messages.create,
+        model="claude-sonnet-4-20250514",
+        max_tokens=2048,
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }],
+        messages=api_messages,
+    )
+    answer_text = ai_response.content[0].text
+
+    # Split into speaker chunks for progressive TTS
+    chunks = _split_into_speaker_chunks(answer_text)
+
+    async def generate_audio_chunks():
+        yield f"data: {json.dumps({'type': 'transcript', 'text': question})}\n\n"
+        yield f"data: {json.dumps({'type': 'answer', 'text': answer_text})}\n\n"
+
+        for i, chunk_text in enumerate(chunks):
+            if not chunk_text.strip():
+                continue
+            try:
+                tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{chunk_text}"
+                async with httpx.AsyncClient() as client:
+                    tts_response = await client.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
+                        json={
+                            "contents": [{"role": "user", "parts": [{"text": tts_prompt}]}],
+                            "generationConfig": {
+                                "responseModalities": ["AUDIO"],
+                                "speechConfig": {
+                                    "multiSpeakerVoiceConfig": {
+                                        "speakerVoiceConfigs": [
+                                            {"speaker": speaker_a, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+                                            {"speaker": speaker_b, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
+                                        ]
+                                    }
+                                },
+                                "temperature": 2.0,
+                            }
+                        },
+                        timeout=120.0,
+                    )
+                audio_b64_chunk = tts_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                yield f"data: {json.dumps({'type': 'audio_chunk', 'index': i, 'audio': audio_b64_chunk})}\n\n"
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                logger.error(f"TTS chunk {i} failed: {e}")
+                yield f"data: {json.dumps({'type': 'tts_error', 'index': i, 'error': str(e)})}\n\n"
+
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        generate_audio_chunks(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
