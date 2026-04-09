@@ -12,6 +12,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 30  # seconds between status checks
+MAX_POLLS = 60  # 30 minutes max
 
 
 async def run_anthropic_batch(requests: list[dict]) -> dict:
@@ -52,8 +53,10 @@ async def run_anthropic_batch(requests: list[dict]) -> dict:
     logger.info(f"Batch API — created batch {batch_id}")
 
     # Poll for completion
+    polls = 0
     while True:
         await asyncio.sleep(POLL_INTERVAL)
+        polls += 1
         batch = client.messages.batches.retrieve(batch_id)
         counts = batch.request_counts
         logger.info(
@@ -63,6 +66,9 @@ async def run_anthropic_batch(requests: list[dict]) -> dict:
         )
         if batch.processing_status == "ended":
             break
+        if polls >= MAX_POLLS:
+            logger.error(f"Batch API — {batch_id} timed out after {MAX_POLLS * POLL_INTERVAL}s")
+            raise Exception(f"Batch {batch_id} timed out after {MAX_POLLS * POLL_INTERVAL} seconds")
 
     # Collect results
     results = {}

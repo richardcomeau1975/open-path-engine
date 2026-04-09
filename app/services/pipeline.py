@@ -16,13 +16,9 @@ from app.services.generators.learning_asset import (
 from app.services.generators.podcast_script import (
     build_podcast_script_prompt, store_podcast_script_result, MODEL as PS_MODEL, MAX_TOKENS as PS_MAX_TOKENS,
 )
-from app.services.generators.notechart import (
-    build_notechart_prompt, store_notechart_result, MODEL as NC_MODEL, MAX_TOKENS as NC_MAX_TOKENS,
-)
 from app.services.generators.visual_overview import (
     build_visual_overview_prompt, store_visual_overview_result, MODEL as VO_MODEL, MAX_TOKENS as VO_MAX_TOKENS,
 )
-from app.services.generators.images import generate_images as gen_images
 from app.services.generators.podcast_audio import generate_podcast_audio as gen_podcast_audio
 from app.services.generators.narration_audio import generate_narration_audio as gen_narration_audio
 from app.services.r2 import download_from_r2
@@ -120,17 +116,18 @@ async def run_pipeline(topic_id: str, supabase_client):
         _update_step(supabase_client, job_id, "generate_podcast_script", steps_completed)
         logger.info(f"Pipeline [{topic_id}] — building Sonnet batch prompts")
 
-        # All three read the learning asset
+        # Notechart questions extracted from YAML during learning asset storage — skip batch
+        steps_completed.append("generate_notechart")
+
+        # Podcast + Visual Overview read the learning asset
         learning_asset = la_text
 
         ps_prompt = await build_podcast_script_prompt(topic_id, supabase_client, learning_asset, **gen_kwargs)
-        nc_prompt = await build_notechart_prompt(topic_id, supabase_client, learning_asset, **gen_kwargs)
         vo_prompt = await build_visual_overview_prompt(topic_id, supabase_client, learning_asset, **gen_kwargs)
 
-        logger.info(f"Pipeline [{topic_id}] — submitting podcast + notechart + visual_overview to Batch API")
+        logger.info(f"Pipeline [{topic_id}] — submitting podcast + visual_overview to Batch API")
         sonnet_results = await run_anthropic_batch([
             {"custom_id": "podcast_script", "model": PS_MODEL, "max_tokens": PS_MAX_TOKENS, "prompt": ps_prompt},
-            {"custom_id": "notechart", "model": NC_MODEL, "max_tokens": NC_MAX_TOKENS, "prompt": nc_prompt},
             {"custom_id": "visual_overview", "model": VO_MODEL, "max_tokens": VO_MAX_TOKENS, "prompt": vo_prompt},
         ])
 
@@ -146,15 +143,6 @@ async def run_pipeline(topic_id: str, supabase_client):
             errors.append("podcast_script batch request failed")
             logger.error(f"Pipeline [{topic_id}] — podcast script FAILED")
 
-        nc_text = sonnet_results.get("notechart")
-        if nc_text:
-            await store_notechart_result(topic_id, supabase_client, nc_text)
-            steps_completed.append("generate_notechart")
-            logger.info(f"Pipeline [{topic_id}] — notechart complete ({len(nc_text)} chars)")
-        else:
-            errors.append("notechart batch request failed")
-            logger.error(f"Pipeline [{topic_id}] — notechart FAILED")
-
         vo_text = sonnet_results.get("visual_overview")
         if vo_text:
             await store_visual_overview_result(topic_id, supabase_client, vo_text)
@@ -166,13 +154,11 @@ async def run_pipeline(topic_id: str, supabase_client):
 
         _update_step(supabase_client, job_id, "generate_visual_overview_script", steps_completed)
 
-        # ── PHASE 3: Non-Anthropic calls (can run concurrently) ─────
-        phase3_tasks = []
+        # Images removed from pipeline — visual overview uses typography
+        steps_completed.append("generate_images")
 
-        # Images depend on visual overview script
-        if vo_text:
-            _update_step(supabase_client, job_id, "generate_images", steps_completed)
-            phase3_tasks.append(("generate_images", gen_images(topic_id, supabase_client)))
+        # ── PHASE 3: Non-Anthropic calls (TTS only) ─────
+        phase3_tasks = []
 
         # Podcast audio depends on podcast script
         if ps_text:

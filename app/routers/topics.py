@@ -48,7 +48,7 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
         {"number": 1, "key": "visual_overview", "name": "Visual Overview", "description": "Build Your Foundation"},
         {"number": 2, "key": "podcast", "name": "Podcast", "description": "Listen & Explore"},
         {"number": 3, "key": "walkthrough", "name": "Knowledge Walkthrough", "description": "Think It Through"},
-        {"number": 4, "key": "note_chart", "name": "Note Chart", "description": "Test Your Recall"},
+        {"number": 4, "key": "notechart", "name": "Active Recall", "description": "Test Your Recall"},
         {"number": 5, "key": "how_tested", "name": "How You're Tested", "description": "Know the Format"},
         {"number": 6, "key": "test_me", "name": "Test Me", "description": "Check Your Understanding"},
     ]
@@ -58,7 +58,7 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
         "visual_overview": bool(topic_data.get("visual_overview_images") and len(topic_data.get("visual_overview_images", [])) > 0),
         "podcast": bool(topic_data.get("podcast_audio_url")),
         "walkthrough": bool(topic_data.get("learning_asset_url")),
-        "note_chart": bool(topic_data.get("notechart_url")),
+        "notechart": bool(topic_data.get("notechart_url")),
         "how_tested": True,
         "test_me": bool(topic_data.get("learning_asset_url")),
     }

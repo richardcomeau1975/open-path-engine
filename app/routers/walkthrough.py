@@ -18,7 +18,7 @@ async def get_sessions(topic_id: str, student: dict = Depends(get_current_studen
     supabase = get_supabase()
 
     result = supabase.table("walkthrough_sessions") \
-        .select("id, mode, cluster, is_active, created_at, updated_at, messages") \
+        .select("id, mode, cluster_index, completion_state, created_at, updated_at, messages") \
         .eq("topic_id", topic_id) \
         .eq("student_id", student["id"]) \
         .order("updated_at", desc=True) \
@@ -30,8 +30,8 @@ async def get_sessions(topic_id: str, student: dict = Depends(get_current_studen
         sessions.append({
             "id": s["id"],
             "mode": s["mode"],
-            "cluster": s["cluster"],
-            "is_active": s["is_active"],
+            "cluster": s["cluster_index"],
+            "is_active": s.get("completion_state") == "in_progress",
             "message_count": msg_count,
             "last_message_preview": s["messages"][-1]["content"][:100] if msg_count > 0 else None,
             "created_at": s["created_at"],
@@ -66,9 +66,9 @@ async def start_session(topic_id: str, request: Request, student: dict = Depends
         "topic_id": topic_id,
         "student_id": student["id"],
         "mode": mode,
-        "cluster": cluster,
+        "cluster_index": cluster,
         "messages": [],
-        "is_active": True,
+        "completion_state": "in_progress",
     }
 
     # Admin can provide a test prompt for this session
@@ -150,8 +150,12 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
 
     # Add mode context
     mode_context = f"\n\nSession mode: {session['mode']}"
-    if session.get("cluster"):
-        mode_context += f"\nFocus cluster: {session['cluster']}"
+    if session.get("cluster_index"):
+        mode_context += f"\nFocus cluster: {session['cluster_index']}"
+    # Check metadata for gaps context
+    session_meta = session.get("metadata") or {}
+    if session_meta.get("gaps_context"):
+        mode_context += f"\n{session_meta['gaps_context']}"
     system_prompt += mode_context
 
     # Build conversation messages for API
@@ -161,12 +165,12 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
     api_messages.append({"role": "user", "content": student_message})
 
     # Call Sonnet with streaming + prompt caching
-    client = anthropic.Anthropic()
+    client = anthropic.AsyncAnthropic()
 
     async def stream_response():
         full_response = ""
         try:
-            with client.messages.stream(
+            async with client.messages.stream(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2048,
                 system=[{
@@ -176,7 +180,7 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
                 }],
                 messages=api_messages,
             ) as stream:
-                for text in stream.text_stream:
+                async for text in stream.text_stream:
                     full_response += text
                     yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
         except Exception as e:
@@ -231,9 +235,10 @@ async def start_gaps_session(topic_id: str, request: Request, student: dict = De
         "topic_id": topic_id,
         "student_id": student["id"],
         "mode": "gaps",
-        "cluster": gaps_context,
+        "cluster_index": None,
         "messages": [],
-        "is_active": True,
+        "completion_state": "in_progress",
+        "metadata": {"gaps_context": gaps_context},
     }).execute()
 
     return {"session": result.data[0], "gaps": fuzzy.data}
@@ -266,7 +271,7 @@ async def get_progress(topic_id: str, student: dict = Depends(get_current_studen
 
     # Walkthrough sessions
     sessions = supabase.table("walkthrough_sessions") \
-        .select("id, mode, is_active, messages, created_at, updated_at") \
+        .select("id, mode, completion_state, messages, created_at, updated_at") \
         .eq("topic_id", topic_id) \
         .eq("student_id", student["id"]) \
         .order("updated_at", desc=True) \
@@ -306,6 +311,6 @@ async def get_progress(topic_id: str, student: dict = Depends(get_current_studen
         "walkthrough": {
             "sessions": walkthrough_sessions_count,
             "total_exchanges": total_messages // 2,
-            "has_active_session": any(s.get("is_active") for s in (sessions.data or [])),
+            "has_active_session": any(s.get("completion_state") == "in_progress" for s in (sessions.data or [])),
         },
     }

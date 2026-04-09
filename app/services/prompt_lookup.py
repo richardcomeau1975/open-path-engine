@@ -22,6 +22,8 @@ def get_prompt_for_feature(feature: str, framework_type: str = None) -> str:
             .eq("feature", feature) \
             .eq("framework_type", framework_type) \
             .eq("is_active", True) \
+            .order("version", desc=True) \
+            .limit(1) \
             .execute()
         if result.data:
             return result.data[0]["content"]
@@ -32,6 +34,8 @@ def get_prompt_for_feature(feature: str, framework_type: str = None) -> str:
         .eq("feature", feature) \
         .is_("framework_type", "null") \
         .eq("is_active", True) \
+        .order("version", desc=True) \
+        .limit(1) \
         .execute()
     if result.data:
         return result.data[0]["content"]

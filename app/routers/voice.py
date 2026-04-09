@@ -197,7 +197,8 @@ async def voice_walkthrough_message(topic_id: str, request: Request, student: di
     api_messages.append({"role": "user", "content": transcript})
 
     ai_client = anthropic.Anthropic()
-    ai_response = ai_client.messages.create(
+    ai_response = await asyncio.to_thread(
+        ai_client.messages.create,
         model="claude-sonnet-4-20250514",
         max_tokens=2048,
         system=[{
@@ -489,13 +490,14 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
 
     # Step 6: Call Sonnet with prompt caching (#6)
     ai_client = anthropic.Anthropic()
-    ai_response = ai_client.messages.create(
+    ai_response = await asyncio.to_thread(
+        ai_client.messages.create,
         model="claude-sonnet-4-20250514",
-        max_tokens=2048,  # (#2) bumped from 1024
+        max_tokens=2048,
         system=[{
             "type": "text",
             "text": system_prompt,
-            "cache_control": {"type": "ephemeral"}  # (#6) prompt caching
+            "cache_control": {"type": "ephemeral"}
         }],
         messages=api_messages,
     )
