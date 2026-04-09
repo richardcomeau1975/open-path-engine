@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import anthropic
@@ -7,6 +8,8 @@ import base64
 import struct
 import asyncio
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
@@ -734,7 +737,17 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                         },
                         timeout=120.0,
                     )
-                audio_b64_chunk = tts_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+                tts_json = tts_response.json()
+                if tts_response.status_code == 429:
+                    logger.warning(f"TTS chunk {i} rate limited (429) — skipping audio")
+                    yield f"data: {json.dumps({'type': 'tts_error', 'index': i, 'error': 'rate_limited'})}\n\n"
+                    await asyncio.sleep(10)
+                    continue
+                if "candidates" not in tts_json:
+                    logger.warning(f"TTS chunk {i} — no candidates in response: {str(tts_json)[:200]}")
+                    yield f"data: {json.dumps({'type': 'tts_error', 'index': i, 'error': 'no_audio_generated'})}\n\n"
+                    continue
+                audio_b64_chunk = tts_json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
                 yield f"data: {json.dumps({'type': 'audio_chunk', 'index': i, 'audio': audio_b64_chunk})}\n\n"
                 if i < len(chunks) - 1:
                     await asyncio.sleep(1)
