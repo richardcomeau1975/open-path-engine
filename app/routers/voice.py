@@ -684,28 +684,31 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
             api_messages.append({"role": msg["role"], "content": msg["content"]})
     api_messages.append({"role": "user", "content": question})
 
-    # Get full Claude response
-    ai_client = anthropic.Anthropic()
-    ai_response = await asyncio.to_thread(
-        ai_client.messages.create,
-        model="claude-sonnet-4-20250514",
-        max_tokens=2048,
-        system=[{
-            "type": "text",
-            "text": system_prompt,
-            "cache_control": {"type": "ephemeral"}
-        }],
-        messages=api_messages,
-    )
-    answer_text = ai_response.content[0].text
-
-    # Split into speaker chunks for progressive TTS
-    chunks = _split_into_speaker_chunks(answer_text)
-
     async def generate_audio_chunks():
+        # Send thinking event immediately so frontend knows we're working
         yield f"data: {json.dumps({'type': 'transcript', 'text': question})}\n\n"
+        yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
+
+        # NOW get Claude response (inside generator so SSE connection is already open)
+        ai_client = anthropic.Anthropic()
+        ai_response = await asyncio.to_thread(
+            ai_client.messages.create,
+            model="claude-sonnet-4-20250514",
+            max_tokens=2048,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            messages=api_messages,
+        )
+        answer_text = ai_response.content[0].text
+
+        # Send the text answer
         yield f"data: {json.dumps({'type': 'answer', 'text': answer_text})}\n\n"
 
+        # Split and TTS progressively
+        chunks = _split_into_speaker_chunks(answer_text)
         for i, chunk_text in enumerate(chunks):
             if not chunk_text.strip():
                 continue
