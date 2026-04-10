@@ -672,7 +672,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
         "NEVER say: learning asset, system, material provided, context, or anything that breaks the illusion. "
         "NEVER refuse to answer. Always give the student something useful. "
         "Don't start with a filler reaction — the student already heard one. Jump straight into the answer. "
-        "Keep it conversational and concise — like a teacher answering in person, not writing an essay. A few sentences is usually enough. The student can ask a follow-up if they want more.\n\n"
+        "Answer in 3-4 sentences MAX. Be direct. One clear point per answer. The student will ask follow-ups if they want more — don't try to cover everything at once.\n\n"
         f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
     if script_context:
