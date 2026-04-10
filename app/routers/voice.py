@@ -202,7 +202,7 @@ async def voice_walkthrough_message(topic_id: str, request: Request, student: di
     ai_client = anthropic.Anthropic()
     ai_response = await asyncio.to_thread(
         ai_client.messages.create,
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6-20250220",
         max_tokens=2048,
         system=[{
             "type": "text",
@@ -495,7 +495,7 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
     ai_client = anthropic.Anthropic()
     ai_response = await asyncio.to_thread(
         ai_client.messages.create,
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6-20250220",
         max_tokens=2048,
         system=[{
             "type": "text",
@@ -702,7 +702,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
 
         try:
             async with client.messages.stream(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6-20250220",
                 max_tokens=2048,
                 system=[{
                     "type": "text",

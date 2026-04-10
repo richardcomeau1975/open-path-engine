@@ -324,7 +324,7 @@ async def upload_exam(
     client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
     analysis_text = ""
     with client.messages.stream(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6-20250220",
         max_tokens=8000,
         messages=[{
             "role": "user",
@@ -349,7 +349,7 @@ async def upload_exam(
         f"\n\n{analysis_text}"
     )
     format_result = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6-20250220",
         max_tokens=200,
         messages=[{"role": "user", "content": format_prompt}]
     )

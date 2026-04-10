@@ -254,7 +254,7 @@ async def _generate_text_output(
             student_id=student_id,
             course_id=course_id,
         )
-        result_text = await _call_claude(prompt, model="claude-sonnet-4-20250514", max_tokens=16384)
+        result_text = await _call_claude(prompt, model="claude-sonnet-4-6-20250220", max_tokens=16384)
         await store_podcast_script_result(topic_id, sb, result_text)
 
     elif output_type == "notechart":
@@ -264,7 +264,7 @@ async def _generate_text_output(
             student_id=student_id,
             course_id=course_id,
         )
-        result_text = await _call_claude(prompt, model="claude-sonnet-4-20250514", max_tokens=8192)
+        result_text = await _call_claude(prompt, model="claude-sonnet-4-6-20250220", max_tokens=8192)
         await store_notechart_result(topic_id, sb, result_text)
 
     elif output_type == "visual_overview_script":
@@ -274,7 +274,7 @@ async def _generate_text_output(
             student_id=student_id,
             course_id=course_id,
         )
-        result_text = await _call_claude(prompt, model="claude-sonnet-4-20250514", max_tokens=8192)
+        result_text = await _call_claude(prompt, model="claude-sonnet-4-6-20250220", max_tokens=8192)
         await store_visual_overview_result(topic_id, sb, result_text)
 
     else:
@@ -601,10 +601,10 @@ async def generate_test_output(
         model = "claude-opus-4-20250514"
         max_tokens = 16384
     elif output_type == "podcast_script":
-        model = "claude-sonnet-4-20250514"
+        model = "claude-sonnet-4-6-20250220"
         max_tokens = 16384
     else:
-        model = "claude-sonnet-4-20250514"
+        model = "claude-sonnet-4-6-20250220"
         max_tokens = 8192
 
     async def _bg_test():
