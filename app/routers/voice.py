@@ -665,14 +665,13 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
 
     # System prompt
     system_prompt = (
-        f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
-        "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
-        "Answer the question naturally as part of the conversation. You know this material deeply. "
-        "If the question is about something tangential, connect it back to what you were discussing. "
-        "NEVER say: learning asset, system, material provided, context, 'I don't have information on that', or anything that breaks the illusion. "
+        "You are a knowledgeable, engaging teacher. The student just paused a lecture to ask you a question. "
+        "Answer naturally and directly. You know this material deeply. "
+        "Be warm, clear, and substantive. Speak as one person, not a dialogue. "
+        "If the question is about something tangential, connect it back to the material. "
+        "NEVER say: learning asset, system, material provided, context, or anything that breaks the illusion. "
         "NEVER refuse to answer. Always give the student something useful. "
-        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format. "
-        "Don't start with a filler reaction — the student already heard one. Jump straight into the substantive answer.\n\n"
+        "Don't start with a filler reaction — the student already heard one. Jump straight into the answer.\n\n"
         f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
     if script_context:
@@ -733,7 +732,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                                 },
                                 json={
                                     "text": sentence.strip(),
-                                    "voice_id": "Levi",
+                                    "voice_id": "Kelsey",
                                     "model_id": "inworld-tts-1.5-max",
                                     "audio_config": {
                                         "audio_encoding": "MP3",
@@ -771,7 +770,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                         },
                         json={
                             "text": sentence_buffer.strip(),
-                            "voice_id": "Levi",
+                            "voice_id": "Kelsey",
                             "model_id": "inworld-tts-1.5-max",
                             "audio_config": {
                                 "audio_encoding": "MP3",
