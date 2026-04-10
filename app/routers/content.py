@@ -94,6 +94,13 @@ async def get_topic_content(topic_id: str, request: Request, student: dict = Dep
             {"key": key, "url": generate_presigned_url(key)} for key in audio_urls
         ]
 
+    # Lecture timestamps (if generated via Inworld TTS)
+    try:
+        ts_bytes = download_from_r2(f"{topic_id}/lecture_timestamps.json")
+        content["lecture_timestamps"] = json.loads(ts_bytes.decode("utf-8"))
+    except Exception:
+        pass
+
     return content
 
 

@@ -14,13 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 IMAGE_STYLE = (
-    "Warm editorial illustration style. Expressive hand-drawn line art with natural ink strokes, "
-    "not sterile or clinical. Selective color — one or two warm tones (muted coral, warm ochre, "
-    "soft grey-blue, sage green). Cream/off-white background. Human figures should have personality "
-    "and visible emotion — posture, expression, gesture tell the story. Think editorial magazine "
-    "illustration with warmth and empathy. Composition: figure in lower-right or lower portion of frame, "
-    "generous negative space above for text. No text in the image. No speech bubbles. No labels."
+    "Generate an image in exactly the style of the reference image. "
+    "Warm editorial illustration. Expressive ink line art with naturalistic color. "
+    "Cream background. Generous negative space above for text overlay. "
+    "No text or labels in the image."
 )
+
+_cached_reference_image = None
+
+def _get_reference_image_b64() -> str:
+    """Download and cache the style reference image from R2."""
+    global _cached_reference_image
+    if _cached_reference_image is None:
+        try:
+            img_bytes = download_from_r2("editorial_illustration.jpeg")
+            _cached_reference_image = base64.b64encode(img_bytes).decode("utf-8")
+        except Exception:
+            _cached_reference_image = ""
+    return _cached_reference_image
 
 
 async def generate_images(topic_id: str, supabase_client) -> list[str]:

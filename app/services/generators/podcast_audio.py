@@ -1,122 +1,145 @@
 """
-Podcast audio generator.
-Reads podcast script from R2, generates multi-speaker audio via Gemini TTS,
-stores WAV on R2.
+Lecture audio generator.
+Uses Inworld TTS (voice: Kelsey) with word-level timestamps.
+Stores MP3 audio + timestamp JSON on R2.
 """
 
 import asyncio
+import base64
+import json
+import re
 import logging
-from app.services.r2 import download_from_r2, upload_bytes_to_r2
-from app.services.generators.tts import generate_multi_speaker_audio
+from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2
+from app.services.generators.tts import inworld_tts
 
 logger = logging.getLogger(__name__)
 
 
 async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
-    """
-    Generate podcast audio from the podcast script.
+    """Generate lecture audio using Inworld TTS with word-level timestamps."""
 
-    1. Download podcast script from R2
-    2. Send to Gemini TTS (multi-speaker)
-    3. Store WAV on R2
-    4. Update topic row
+    # Load script
+    topic = supabase_client.table("topics").select("podcast_script_url").eq("id", topic_id).execute()
+    if not topic.data or not topic.data[0].get("podcast_script_url"):
+        raise Exception("No lecture script found")
 
-    Returns the R2 key of the stored audio.
-    """
-    # Get topic info
-    topic_result = supabase_client.table("topics").select(
-        "id, podcast_script_url"
-    ).eq("id", topic_id).execute()
-    topic = topic_result.data[0]
+    script_bytes = download_from_r2(topic.data[0]["podcast_script_url"])
+    script = script_bytes.decode("utf-8")
+    logger.info(f"Lecture audio [{topic_id}] — loaded script ({len(script)} chars)")
 
-    if not topic.get("podcast_script_url"):
-        raise ValueError(f"No podcast script found for topic {topic_id}")
+    # Extract anchor markers
+    anchors = []
+    for match in re.finditer(r'\[ANCHOR:\s*"([^"]+)"\]', script):
+        anchors.append({"text": match.group(1), "char_position": match.start()})
 
-    # Download podcast script
-    script_text = download_from_r2(topic["podcast_script_url"]).decode("utf-8")
-    logger.info(f"Podcast audio [{topic_id}] — loaded script ({len(script_text)} chars)")
+    # Clean script for TTS
+    clean_script = re.sub(r'\[ANCHOR:\s*"[^"]+"\]', '', script)
 
-    # Parse speaker names from the script
-    speaker_a = "Host"
-    speaker_b = "Expert"
-    for line in script_text.split("\n")[:20]:
-        line = line.strip()
-        if ":" in line:
-            name = line.split(":")[0].strip()
-            if name and len(name) < 30 and not name.startswith("["):
-                if speaker_a == "Host":
-                    speaker_a = name
-                elif name != speaker_a:
-                    speaker_b = name
-                    break
+    # Chunk at paragraph boundaries
+    paragraphs = clean_script.split("\n\n")
+    chunks = []
+    current = ""
+    for para in paragraphs:
+        if len(current) + len(para) + 2 > 4000 and current:
+            chunks.append(current.strip())
+            current = ""
+        current += para + "\n\n"
+    if current.strip():
+        chunks.append(current.strip())
 
-    logger.info(f"Podcast audio [{topic_id}] — detected speakers: {speaker_a}, {speaker_b}")
+    logger.info(f"Lecture audio [{topic_id}] — {len(chunks)} chunks, {len(anchors)} anchors")
 
-    # Chunk the script to avoid Gemini TTS ~10min output limit per call.
-    # Split at natural speaker-line boundaries, ~8000 chars per chunk.
-    CHUNK_SIZE = 8000
-    chunks = _chunk_script(script_text, CHUNK_SIZE)
-    logger.info(f"Podcast audio [{topic_id}] — split into {len(chunks)} chunks")
+    # TTS each chunk
+    all_audio_parts = []
+    all_timestamps = []
+    cumulative_time = 0.0
 
-    # Generate audio for each chunk and concatenate
-    all_pcm = bytearray()
     for i, chunk in enumerate(chunks):
         if i > 0:
-            logger.info(f"Podcast audio [{topic_id}] — waiting 7s for TTS rate limit")
-            await asyncio.sleep(7)
-        logger.info(f"Podcast audio [{topic_id}] — generating chunk {i + 1}/{len(chunks)} ({len(chunk)} chars)")
-        wav_data = await generate_multi_speaker_audio(chunk, speaker_a, speaker_b)
-        # Extract PCM from WAV (skip 44-byte header)
-        all_pcm.extend(wav_data[44:])
+            await asyncio.sleep(1)
+        logger.info(f"Lecture audio [{topic_id}] — TTS chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
 
-    # Wrap concatenated PCM in a single WAV
-    import io, wave
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(24000)
-        wf.writeframes(bytes(all_pcm))
-    wav_data = buf.getvalue()
-    logger.info(f"Podcast audio [{topic_id}] — total audio: {len(wav_data)} bytes ({len(all_pcm) / 24000 / 2:.0f}s)")
+        result = await inworld_tts(chunk, voice_id="Kelsey", get_timestamps=True)
 
-    # Store on R2
-    r2_key = f"{topic_id}/podcast_audio.wav"
-    upload_bytes_to_r2(r2_key, wav_data, content_type="audio/wav")
-    logger.info(f"Podcast audio [{topic_id}] — stored on R2 at {r2_key} ({len(wav_data)} bytes)")
+        if not result["audio"]:
+            logger.error(f"Lecture audio [{topic_id}] — chunk {i+1} no audio")
+            continue
 
-    # Update topic row
+        all_audio_parts.append(base64.b64decode(result["audio"]))
+
+        if result["timestamps"]:
+            words = result["timestamps"].get("words", [])
+            starts = result["timestamps"].get("wordStartTimeSeconds", [])
+            ends = result["timestamps"].get("wordEndTimeSeconds", [])
+            for j in range(min(len(words), len(starts), len(ends))):
+                all_timestamps.append({
+                    "word": words[j],
+                    "start": starts[j] + cumulative_time,
+                    "end": ends[j] + cumulative_time,
+                })
+            if ends:
+                cumulative_time = ends[-1] + cumulative_time + 0.1
+
+    if not all_audio_parts:
+        raise Exception("No audio generated")
+
+    # Concatenate MP3 parts
+    combined_audio = b"".join(all_audio_parts)
+
+    # Match anchors to timestamps
+    anchor_timings = []
+    for anchor in anchors:
+        anchor_words = anchor["text"].lower().split()
+        if not anchor_words:
+            continue
+        matched = False
+        for i, ts in enumerate(all_timestamps):
+            if ts["word"].lower().strip(".,!?;:\"'") == anchor_words[0].strip(".,!?;:\"'"):
+                match = True
+                for k, aw in enumerate(anchor_words[1:], 1):
+                    if i + k >= len(all_timestamps):
+                        match = False
+                        break
+                    if all_timestamps[i + k]["word"].lower().strip(".,!?;:\"'") != aw.strip(".,!?;:\"'"):
+                        match = False
+                        break
+                if match:
+                    end_idx = min(i + len(anchor_words) - 1, len(all_timestamps) - 1)
+                    anchor_timings.append({
+                        "text": anchor["text"],
+                        "start_time": ts["start"],
+                        "end_time": all_timestamps[end_idx]["end"],
+                    })
+                    matched = True
+                    break
+        if not matched:
+            total_chars = sum(len(ts["word"]) + 1 for ts in all_timestamps)
+            if total_chars > 0 and all_timestamps:
+                ratio = anchor["char_position"] / max(total_chars, 1)
+                est_time = ratio * all_timestamps[-1]["end"]
+                anchor_timings.append({
+                    "text": anchor["text"],
+                    "start_time": est_time,
+                    "end_time": est_time + 3.0,
+                    "estimated": True,
+                })
+
+    # Upload audio
+    audio_key = f"{topic_id}/podcast_audio.mp3"
+    upload_bytes_to_r2(audio_key, combined_audio, content_type="audio/mpeg")
+
+    # Upload timestamps
+    timestamp_key = f"{topic_id}/lecture_timestamps.json"
+    upload_text_to_r2(timestamp_key, json.dumps({
+        "total_duration": cumulative_time,
+        "anchors": anchor_timings,
+        "word_count": len(all_timestamps),
+    }, indent=2))
+
+    # Update topic
     supabase_client.table("topics").update({
-        "podcast_audio_url": r2_key
+        "podcast_audio_url": audio_key,
     }).eq("id", topic_id).execute()
 
-    return r2_key
-
-
-def _chunk_script(script_text: str, max_chars: int = 8000) -> list[str]:
-    """
-    Split a podcast script into chunks at speaker-line boundaries.
-    Each chunk stays under max_chars. Preserves complete speaker turns.
-    """
-    lines = script_text.split("\n")
-    chunks = []
-    current_chunk = []
-    current_len = 0
-
-    for line in lines:
-        line_len = len(line) + 1  # +1 for newline
-        if current_len + line_len > max_chars and current_chunk:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = []
-            current_len = 0
-        current_chunk.append(line)
-        current_len += line_len
-
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
-
-    # If script is short enough for one chunk, return as-is
-    if not chunks:
-        chunks = [script_text]
-
-    return chunks
+    logger.info(f"Lecture audio [{topic_id}] — done. {len(anchor_timings)} anchors, {cumulative_time:.1f}s")
+    return audio_key
