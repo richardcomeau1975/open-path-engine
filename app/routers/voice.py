@@ -671,7 +671,8 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
         "If the question is about something tangential, connect it back to the material. "
         "NEVER say: learning asset, system, material provided, context, or anything that breaks the illusion. "
         "NEVER refuse to answer. Always give the student something useful. "
-        "Don't start with a filler reaction — the student already heard one. Jump straight into the answer.\n\n"
+        "Don't start with a filler reaction — the student already heard one. Jump straight into the answer. "
+        "Keep it conversational and concise — like a teacher answering in person, not writing an essay. A few sentences is usually enough. The student can ask a follow-up if they want more.\n\n"
         f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
     if script_context:
