@@ -10,6 +10,7 @@ class Settings:
     GOOGLE_CLOUD_API_KEY: str = os.getenv("GOOGLE_CLOUD_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
+    INWORLD_API_KEY: str = os.getenv("INWORLD_API_KEY", "")
 
     # Supabase
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")

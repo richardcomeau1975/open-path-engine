@@ -555,11 +555,11 @@ async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(g
     }
 
 
-# ── True Streaming Q&A — Claude streams, TTS fires at sentence boundaries ──
+# ── True Streaming Q&A — Claude streams, Inworld TTS fires at sentence boundaries ──
 
 
-def _has_complete_sentence(buffer: str) -> bool:
-    """Check if buffer contains at least one complete sentence to TTS."""
+def _has_tts_chunk(buffer: str) -> bool:
+    """Check if buffer has a complete sentence or speaker turn to TTS."""
     import re
     if re.search(r'[.!?]\s', buffer):
         return True
@@ -568,8 +568,8 @@ def _has_complete_sentence(buffer: str) -> bool:
     return False
 
 
-def _extract_sentence(buffer: str) -> tuple:
-    """Extract the first complete sentence from buffer. Returns (sentence, remaining)."""
+def _extract_tts_chunk(buffer: str) -> tuple:
+    """Extract first complete sentence or speaker turn. Returns (chunk, remaining)."""
     import re
     speaker_match = re.search(r'\n\s*(?=(?:HOST\s*[AB]|[A-Z][a-z]+)\s*:)', buffer)
     if speaker_match and speaker_match.start() > 10:
@@ -583,7 +583,7 @@ def _extract_sentence(buffer: str) -> tuple:
 
 @router.post("/podcast/{topic_id}/ask-stream")
 async def podcast_ask_stream(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
-    """Podcast Q&A with true streaming — TTS fires as Claude generates, not after."""
+    """Podcast Q&A with true streaming — Claude streams, Inworld TTS fires at sentence boundaries."""
     body = await request.json()
     audio_b64_input = body.get("audio")
     text_question = body.get("text")
@@ -663,7 +663,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
     elif podcast_script:
         script_context = podcast_script[-2000:] if len(podcast_script) > 2000 else podcast_script
 
-    # System prompt — asks for SHORT responses
+    # System prompt
     system_prompt = (
         f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
         "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
@@ -687,21 +687,23 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
 
     # The streaming generator
     async def generate_stream():
+        import re
+
         yield f"data: {json.dumps({'type': 'transcript', 'text': question})}\n\n"
         yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
 
-        # Stream Claude response, buffer sentences, TTS each one
+        # Stream Claude, buffer sentences, TTS each one via Inworld
         client = anthropic.AsyncAnthropic()
 
         full_response = ""
         sentence_buffer = ""
         chunk_index = 0
-        tts_client = httpx.AsyncClient(timeout=60.0)
+        tts_client = httpx.AsyncClient(timeout=30.0)
 
         try:
             async with client.messages.stream(
                 model="claude-sonnet-4-20250514",
-                max_tokens=1024,
+                max_tokens=2048,
                 system=[{
                     "type": "text",
                     "text": system_prompt,
@@ -713,46 +715,42 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                     full_response += text
                     sentence_buffer += text
 
-                    while _has_complete_sentence(sentence_buffer):
-                        sentence, sentence_buffer = _extract_sentence(sentence_buffer)
+                    while _has_tts_chunk(sentence_buffer):
+                        sentence, sentence_buffer = _extract_tts_chunk(sentence_buffer)
 
                         if not sentence.strip():
                             continue
 
                         yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
 
+                        # TTS via Inworld
                         try:
-                            tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{sentence}"
                             tts_response = await tts_client.post(
-                                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
+                                "https://api.inworld.ai/tts/v1/voice",
+                                headers={
+                                    "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                                    "Content-Type": "application/json",
+                                },
                                 json={
-                                    "contents": [{"role": "user", "parts": [{"text": tts_prompt}]}],
-                                    "generationConfig": {
-                                        "responseModalities": ["AUDIO"],
-                                        "speechConfig": {
-                                            "multiSpeakerVoiceConfig": {
-                                                "speakerVoiceConfigs": [
-                                                    {"speaker": speaker_a, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
-                                                    {"speaker": speaker_b, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
-                                                ]
-                                            }
-                                        },
-                                        "temperature": 2.0,
-                                    }
+                                    "text": sentence.strip(),
+                                    "voice_id": "Levi",
+                                    "model_id": "inworld-tts-1.5-max",
+                                    "audio_config": {
+                                        "audio_encoding": "MP3",
+                                    },
                                 },
                             )
 
-                            tts_json = tts_response.json()
-                            if tts_response.status_code == 429:
-                                logger.warning(f"TTS chunk {chunk_index} rate limited — skipping audio")
-                                yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': 'rate_limited'})}\n\n"
-                                await asyncio.sleep(5)
-                            elif "candidates" in tts_json:
-                                audio_b64 = tts_json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                                yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64})}\n\n"
+                            if tts_response.status_code == 200:
+                                tts_json = tts_response.json()
+                                audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                                if audio_b64:
+                                    yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                                else:
+                                    logger.warning(f"TTS chunk {chunk_index} — no audioContent in response")
                             else:
-                                logger.warning(f"TTS chunk {chunk_index} — unexpected response")
-                                yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': 'unexpected_response'})}\n\n"
+                                logger.warning(f"TTS chunk {chunk_index} failed: {tts_response.status_code} {tts_response.text[:200]}")
+                                yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': f'HTTP {tts_response.status_code}'})}\n\n"
 
                         except Exception as e:
                             logger.error(f"TTS chunk {chunk_index} failed: {e}")
@@ -760,34 +758,32 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
 
                         chunk_index += 1
 
-            # Handle remaining text in buffer
+            # Handle remaining buffer
             if sentence_buffer.strip():
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence_buffer})}\n\n"
 
                 try:
-                    tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{sentence_buffer}"
                     tts_response = await tts_client.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
+                        "https://api.inworld.ai/tts/v1/voice",
+                        headers={
+                            "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
                         json={
-                            "contents": [{"role": "user", "parts": [{"text": tts_prompt}]}],
-                            "generationConfig": {
-                                "responseModalities": ["AUDIO"],
-                                "speechConfig": {
-                                    "multiSpeakerVoiceConfig": {
-                                        "speakerVoiceConfigs": [
-                                            {"speaker": speaker_a, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
-                                            {"speaker": speaker_b, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
-                                        ]
-                                    }
-                                },
-                                "temperature": 2.0,
-                            }
+                            "text": sentence_buffer.strip(),
+                            "voice_id": "Levi",
+                            "model_id": "inworld-tts-1.5-max",
+                            "audio_config": {
+                                "audio_encoding": "MP3",
+                            },
                         },
                     )
-                    tts_json = tts_response.json()
-                    if "candidates" in tts_json:
-                        audio_b64 = tts_json["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                        yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64})}\n\n"
+
+                    if tts_response.status_code == 200:
+                        tts_json = tts_response.json()
+                        audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                        if audio_b64:
+                            yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
                 except Exception as e:
                     logger.error(f"TTS final chunk failed: {e}")
 
