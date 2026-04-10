@@ -147,7 +147,7 @@ async def travel_ask_stream(request: Request, student: dict = Depends(get_curren
 
         try:
             async with client.messages.stream(
-                model="claude-sonnet-4-6-20250220",
+                model="claude-sonnet-4-6",
                 max_tokens=2048,
                 system=[{
                     "type": "text",

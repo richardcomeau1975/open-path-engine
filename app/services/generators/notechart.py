@@ -10,7 +10,7 @@ from app.services.modifier_assembly import gather_modifiers
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-6-20250220"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8000
 
 
