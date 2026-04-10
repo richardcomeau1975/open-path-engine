@@ -13,6 +13,16 @@ from app.services.r2 import download_from_r2, upload_bytes_to_r2
 logger = logging.getLogger(__name__)
 
 
+IMAGE_STYLE = (
+    "Warm editorial illustration style. Expressive hand-drawn line art with natural ink strokes, "
+    "not sterile or clinical. Selective color — one or two warm tones (muted coral, warm ochre, "
+    "soft grey-blue, sage green). Cream/off-white background. Human figures should have personality "
+    "and visible emotion — posture, expression, gesture tell the story. Think editorial magazine "
+    "illustration with warmth and empathy. Composition: figure in lower-right or lower portion of frame, "
+    "generous negative space above for text. No text in the image. No speech bubbles. No labels."
+)
+
+
 async def generate_images(topic_id: str, supabase_client) -> list[str]:
     """
     Generate images for the visual overview.
@@ -77,7 +87,7 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
                 },
                 json={
                     "model": "gpt-image-1",
-                    "prompt": f"Minimal pen and ink line drawing on cream paper. Thin clean black ink outlines only. Extremely sparse composition — most of the image is empty cream off-white background. Only the faintest hint of color as a very light watercolor wash on one or two small elements like clothing. No filled backgrounds. No heavy color. No painting. No watercolor washes covering large areas. Figures and objects float on cream paper with abundant negative space. The figure or scene should be positioned in the lower portion of the frame, leaving the top third mostly empty cream space. Simple clean editorial sketch style like a New Yorker spot illustration. Scene: {image_prompt}",
+                    "prompt": f"{IMAGE_STYLE} Scene: {image_prompt}",
                     "n": 1,
                     "size": "1536x1024",
                     "quality": "medium",
