@@ -48,7 +48,7 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     chunks = []
     current = ""
     for para in paragraphs:
-        if len(current) + len(para) + 2 > 4000 and current:
+        if len(current) + len(para) + 2 > 2000 and current:
             chunks.append(current.strip())
             current = ""
         current += para + "\n\n"

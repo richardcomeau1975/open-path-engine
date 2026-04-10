@@ -152,7 +152,8 @@ async def inworld_tts(text: str, voice_id: str = "Kelsey", get_timestamps: bool 
         )
 
     if response.status_code != 200:
-        raise Exception(f"Inworld TTS failed: HTTP {response.status_code}")
+        logger.error(f"Inworld TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
+        raise Exception(f"Inworld TTS failed: HTTP {response.status_code} — {response.text[:200]}")
 
     data = response.json()
     result = {

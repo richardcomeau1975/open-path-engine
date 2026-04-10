@@ -536,6 +536,17 @@ async def generate_admin_output(
             _generation_progress[topic_id]["status"] = "done"
             _generation_progress[topic_id]["current"] = None
             logger.info(f"admin generate [{topic_id}] — {output_type} completed")
+
+            # Auto-chain: podcast_script → podcast_audio
+            if output_type == "podcast_script":
+                try:
+                    logger.info(f"admin generate [{topic_id}] — auto-chaining to podcast_audio")
+                    from app.services.generators.podcast_audio import generate_podcast_audio
+                    await generate_podcast_audio(topic_id, bg_sb)
+                    logger.info(f"admin generate [{topic_id}] — podcast_audio auto-chain completed")
+                except Exception as e:
+                    logger.error(f"admin generate [{topic_id}] — podcast_audio auto-chain failed: {e}")
+
         except Exception as e:
             _update_step_status(topic_id, output_type, "failed", str(e))
             _generation_progress[topic_id]["status"] = "failed"
