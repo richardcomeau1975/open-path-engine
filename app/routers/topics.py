@@ -40,9 +40,8 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
     if not course_info or course_info.get("student_id") != student["id"]:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    # Get progress for this topic
-    progress = sb.table("progress").select("feature, state").eq("topic_id", topic_id).eq("student_id", student["id"]).execute()
-    progress_map = {p["feature"]: p["state"] for p in progress.data}
+    # Progress tracking not yet implemented
+    progress_map = {}
 
     features = [
         {"number": 1, "key": "visual_overview", "name": "Visual Overview", "description": "Build Your Foundation"},
