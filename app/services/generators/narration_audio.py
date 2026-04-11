@@ -1,14 +1,15 @@
 """
 Visual overview narration audio generator.
-Reads visual overview script, generates per-slide narration via Gemini TTS (single-speaker),
-stores WAV files on R2.
+Reads visual overview script, generates per-slide narration via Inworld TTS (Kelsey),
+stores MP3 files on R2.
 """
 
 import asyncio
+import base64
 import json
 import logging
 from app.services.r2 import download_from_r2, upload_bytes_to_r2
-from app.services.generators.tts import generate_single_speaker_audio
+from app.services.generators.tts import inworld_tts
 
 logger = logging.getLogger(__name__)
 
@@ -67,17 +68,18 @@ async def generate_narration_audio(topic_id: str, supabase_client) -> list[str]:
 
         logger.info(f"Narration audio [{topic_id}] — generating audio for slide {slide_num}")
 
-        # Generate single-speaker audio
-        wav_data = await generate_single_speaker_audio(
-            f"Say the following in a warm, clear, educational tone: {narration}",
-            voice_name="Kore"
-        )
+        # Generate audio via Inworld TTS (Kelsey)
+        tts_result = await inworld_tts(narration, voice_id="Kelsey")
+        if not tts_result or not tts_result.get("audio"):
+            logger.warning(f"Narration audio [{topic_id}] — TTS failed for slide {slide_num}, skipping")
+            continue
+        audio_data = base64.b64decode(tts_result["audio"])
 
         # Store on R2
-        r2_key = f"{topic_id}/narration/slide_{slide_num}.wav"
-        upload_bytes_to_r2(r2_key, wav_data, content_type="audio/wav")
+        r2_key = f"{topic_id}/narration/slide_{slide_num}.mp3"
+        upload_bytes_to_r2(r2_key, audio_data, content_type="audio/mpeg")
         audio_keys.append(r2_key)
-        logger.info(f"Narration audio [{topic_id}] — stored slide {slide_num} ({len(wav_data)} bytes)")
+        logger.info(f"Narration audio [{topic_id}] — stored slide {slide_num} ({len(audio_data)} bytes)")
 
     # Update topic row
     supabase_client.table("topics").update({

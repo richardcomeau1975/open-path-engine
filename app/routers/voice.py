@@ -214,29 +214,15 @@ async def voice_walkthrough_message(topic_id: str, request: Request, student: di
 
     ai_text = ai_response.content[0].text
 
-    # Step 3: TTS
-    async with httpx.AsyncClient() as client:
-        tts_response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
-            json={
-                "contents": [{"parts": [{"text": ai_text}]}],
-                "generationConfig": {
-                    "response_modalities": ["AUDIO"],
-                    "speech_config": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {"voiceName": "Kore"}
-                        }
-                    }
-                }
-            },
-            timeout=60.0,
-        )
-
+    # Step 3: TTS via Inworld (Kelsey — same voice as lecture)
+    from app.services.generators.tts import inworld_tts
     audio_response_b64 = None
     try:
-        audio_response_b64 = tts_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-    except (KeyError, IndexError):
-        pass
+        tts_result = await inworld_tts(ai_text, voice_id="Kelsey")
+        if tts_result and tts_result.get("audio"):
+            audio_response_b64 = tts_result["audio"]
+    except Exception as e:
+        logger.warning(f"Walkthrough TTS failed: {e}")
 
     # Save conversation
     messages.append({"role": "user", "content": transcript})
@@ -263,88 +249,48 @@ async def generate_filler_clips(student: dict = Depends(get_current_student)):
         raise HTTPException(403, "Admin only")
 
     from app.services.r2 import upload_bytes_to_r2
-    import io
-    import wave
-
-    GEMINI_TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
-    SA = "HOST A"
-    SB = "HOST B"
+    from app.services.generators.tts import inworld_tts
 
     FILLERS = {
         "a": [
-            f"{SA}: Oh — yeah yeah yeah, so that's actually the thing, right?",
-            f"{SB}: OK so you're picking up on exactly what I was about to get into—",
-            f"{SA}: Ha! I was literally just going to say something about that—",
-            f"{SB}: Oh that's — yeah, that's the key question actually.",
+            "Oh — yeah yeah yeah, so that's actually the thing, right?",
+            "OK so you're picking up on exactly what I was about to get into—",
+            "Ha! I was literally just going to say something about that—",
+            "Oh that's — yeah, that's the key question actually.",
         ],
         "b": [
-            f"{SA}: Ooh. OK. That's interesting, let me think about that for a second...",
-            f"{SB}: Hmm — you know what, that's a really good question actually...",
-            f"{SA}: Oh wow, OK — so that's a different angle but it connects...",
-            f"{SB}: That's — yeah. OK so here's the thing about that...",
+            "Ooh. OK. That's interesting, let me think about that for a second...",
+            "Hmm — you know what, that's a really good question actually...",
+            "Oh wow, OK — so that's a different angle but it connects...",
+            "That's — yeah. OK so here's the thing about that...",
         ],
         "c": [
-            f"{SA}: Right right right — OK so let me back up for a sec...",
-            f"{SB}: Oh — yeah, I probably should have been clearer about that...",
-            f"{SA}: OK fair, let me put it differently—",
-            f"{SB}: Yeah so — the way I think about it is...",
+            "Right right right — OK so let me back up for a sec...",
+            "Oh — yeah, I probably should have been clearer about that...",
+            "OK fair, let me put it differently—",
+            "Yeah so — the way I think about it is...",
         ],
         "d": [
-            f"{SA}: Oh — OK I see where you're going with that...",
-            f"{SB}: Hm. That's fair actually. So here's the thing though—",
-            f"{SA}: Yeah, no, that's a legitimate question...",
-            f"{SB}: Interesting — so you're saying like, why would that be the case?",
+            "Oh — OK I see where you're going with that...",
+            "Hm. That's fair actually. So here's the thing though—",
+            "Yeah, no, that's a legitimate question...",
+            "Interesting — so you're saying like, why would that be the case?",
         ],
     }
 
     results = []
     for category, lines in FILLERS.items():
         for i, line in enumerate(lines, 1):
-            key = f"filler_audio/category_{category}_{i}.wav"
-            prompt = f"TTS the following conversation between {SA} and {SB}:\n\n{line}"
-
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {
-                        "multiSpeakerVoiceConfig": {
-                            "speakerVoiceConfigs": [
-                                {"speaker": SA, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
-                                {"speaker": SB, "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Puck"}}},
-                            ]
-                        }
-                    },
-                    "temperature": 2.0,
-                }
-            }
+            key = f"filler_audio/category_{category}_{i}.mp3"
 
             try:
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    response = await client.post(
-                        f"{GEMINI_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}",
-                        json=payload,
-                    )
-
-                if response.status_code != 200:
-                    results.append({"key": key, "status": "failed", "error": f"{response.status_code}"})
-                    continue
-
-                result = response.json()
-                audio_b64 = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-                pcm_data = base64.b64decode(audio_b64)
-
-                buf = io.BytesIO()
-                with wave.open(buf, "wb") as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(24000)
-                    wf.writeframes(pcm_data)
-                wav_data = buf.getvalue()
-
-                upload_bytes_to_r2(key, wav_data, content_type="audio/wav")
-                duration = len(pcm_data) / (24000 * 2)
-                results.append({"key": key, "status": "ok", "duration": f"{duration:.1f}s", "bytes": len(wav_data)})
+                tts_result = await inworld_tts(line, voice_id="Kelsey")
+                if tts_result and tts_result.get("audio"):
+                    audio_data = base64.b64decode(tts_result["audio"])
+                    upload_bytes_to_r2(key, audio_data, content_type="audio/mpeg")
+                    results.append({"key": key, "status": "ok", "bytes": len(audio_data)})
+                else:
+                    results.append({"key": key, "status": "failed", "error": "no audio returned"})
             except Exception as e:
                 results.append({"key": key, "status": "failed", "error": str(e)})
 
@@ -361,7 +307,7 @@ async def get_filler_urls(student: dict = Depends(get_current_student)):
     fillers = []
     for cat in categories:
         for i in range(1, 5):
-            key = f"filler_audio/category_{cat}_{i}.wav"
+            key = f"filler_audio/category_{cat}_{i}.mp3"
             try:
                 url = generate_presigned_url(key)
                 fillers.append({"key": key, "category": cat, "index": i, "url": url})
@@ -370,190 +316,7 @@ async def get_filler_urls(student: dict = Depends(get_current_student)):
     return {"fillers": fillers}
 
 
-# ── Podcast Q&A ──────────────────────────────────────────────────
-
-@router.post("/podcast/{topic_id}/ask")
-async def podcast_ask(topic_id: str, request: Request, student: dict = Depends(get_current_student)):
-    body = await request.json()
-    audio_b64 = body.get("audio")
-    text_question = body.get("text")
-    paused_at = body.get("pausedAt", 0)  # seconds into the podcast
-    history = body.get("history", [])  # previous Q&A exchanges
-
-    supabase = get_supabase()
-
-    # Step 1: Get the question text
-    question = text_question
-    if audio_b64 and not question:
-        audio_bytes = base64.b64decode(audio_b64)
-        async with httpx.AsyncClient() as client:
-            stt_response = await client.post(
-                "https://api.deepgram.com/v1/listen",
-                params={"model": "nova-3", "smart_format": "true", "language": "en"},
-                headers={
-                    "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
-                    "Content-Type": "audio/webm",
-                },
-                content=audio_bytes,
-                timeout=30.0,
-            )
-        try:
-            question = stt_response.json()["results"]["channels"][0]["alternatives"][0]["transcript"]
-        except (KeyError, IndexError):
-            raise HTTPException(502, "Transcription failed")
-
-    if not question or not question.strip():
-        return {"transcript": "", "answer": "", "audio": None}
-
-    # Step 2: Load learning asset + podcast script
-    topic = supabase.table("topics") \
-        .select("learning_asset_url, podcast_script_url, course_id") \
-        .eq("id", topic_id) \
-        .execute()
-
-    if not topic.data:
-        raise HTTPException(404, "Topic not found")
-
-    learning_asset = ""
-    if topic.data[0].get("learning_asset_url"):
-        try:
-            asset_bytes = download_from_r2(topic.data[0]["learning_asset_url"])
-            learning_asset = asset_bytes.decode("utf-8")
-        except:
-            pass
-
-    podcast_script = ""
-    if topic.data[0].get("podcast_script_url"):
-        try:
-            ps_bytes = download_from_r2(topic.data[0]["podcast_script_url"])
-            podcast_script = ps_bytes.decode("utf-8")
-        except:
-            pass
-
-    # Detect speaker names from script
-    speaker_a = "HOST A"
-    speaker_b = "HOST B"
-    last_speaker_at_pause = speaker_a
-    for line in podcast_script.split("\n")[:20]:
-        line = line.strip()
-        if ":" in line:
-            name = line.split(":")[0].strip()
-            if name and len(name) < 30 and not name.startswith("["):
-                if speaker_a == "HOST A":
-                    speaker_a = name
-                elif name != speaker_a:
-                    speaker_b = name
-                    break
-
-    # Step 3: Use pausedAt to find relevant script section
-    # ~150 words per minute spoken, ~6 chars per word = ~900 chars per minute
-    script_context = ""
-    if podcast_script and paused_at > 0:
-        chars_per_second = 900 / 60  # ~15 chars/sec
-        estimated_position = int(paused_at * chars_per_second)
-        start = max(0, estimated_position - 1000)
-        end = min(len(podcast_script), estimated_position + 500)
-        script_context = podcast_script[start:end]
-
-        # Figure out which speaker was likely talking at pause point
-        # Look at the last speaker line before the estimated position
-        text_before = podcast_script[:estimated_position]
-        for line in reversed(text_before.split("\n")):
-            line = line.strip()
-            if ":" in line:
-                name = line.split(":")[0].strip()
-                if name == speaker_a or name == speaker_b:
-                    last_speaker_at_pause = name
-                    break
-    elif podcast_script:
-        script_context = podcast_script[-2000:] if len(podcast_script) > 2000 else podcast_script
-
-    # Step 4: Build system prompt with prompt caching
-    system_prompt = (
-        f"You are the two podcast hosts, {speaker_a} and {speaker_b}. The student just paused the podcast to ask you a question. "
-        "Stay completely in character — same tone, same energy, same conversational dynamic between the two of you. "
-        "Answer the question naturally as part of the conversation. You know this material deeply. "
-        "If the question is about something tangential, connect it back to what you were discussing. "
-        "If you genuinely don't know, say something like 'honestly that's a great question, I think it connects to...' and bridge to something you do know. "
-        "NEVER say: learning asset, system, material provided, context, 'I don't have information on that', or anything that breaks the illusion that you're two real people having a conversation. "
-        "NEVER refuse to answer. Always give the student something useful. "
-        f"Write your response as dialogue between {speaker_a} and {speaker_b}, exactly like the podcast script format. "
-        "Don't start with a filler reaction — the student already heard one. Jump straight into the substantive answer.\n\n"
-        f"LEARNING ASSET:\n\n{learning_asset}\n\n"
-    )
-    if script_context:
-        system_prompt += f"WHAT WAS BEING DISCUSSED WHEN THE STUDENT PAUSED:\n\n{script_context}"
-
-    # Step 5: Build messages with conversation history
-    api_messages = []
-    for msg in history:
-        if msg.get("role") and msg.get("content"):
-            api_messages.append({"role": msg["role"], "content": msg["content"]})
-    api_messages.append({"role": "user", "content": question})
-
-    # Step 6: Call Sonnet with prompt caching (#6)
-    ai_client = anthropic.Anthropic()
-    ai_response = await asyncio.to_thread(
-        ai_client.messages.create,
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        system=[{
-            "type": "text",
-            "text": system_prompt,
-            "cache_control": {"type": "ephemeral"}
-        }],
-        messages=api_messages,
-    )
-
-    answer_text = ai_response.content[0].text
-
-    # Step 7: Multi-speaker TTS matching podcast voices
-    tts_prompt = f"TTS the following conversation between {speaker_a} and {speaker_b}:\n\n{answer_text}"
-
-    audio_response_b64 = None
-    async with httpx.AsyncClient() as client:
-        tts_response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
-            json={
-                "contents": [{"role": "user", "parts": [{"text": tts_prompt}]}],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {
-                        "multiSpeakerVoiceConfig": {
-                            "speakerVoiceConfigs": [
-                                {
-                                    "speaker": speaker_a,
-                                    "voiceConfig": {
-                                        "prebuiltVoiceConfig": {"voiceName": "Kore"}
-                                    }
-                                },
-                                {
-                                    "speaker": speaker_b,
-                                    "voiceConfig": {
-                                        "prebuiltVoiceConfig": {"voiceName": "Puck"}
-                                    }
-                                }
-                            ]
-                        }
-                    },
-                    "temperature": 2.0,
-                }
-            },
-            timeout=120.0,
-        )
-
-    try:
-        audio_response_b64 = tts_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-    except (KeyError, IndexError):
-        pass
-
-    return {
-        "transcript": question,
-        "answer": answer_text,
-        "audio": audio_response_b64,
-        "last_speaker": last_speaker_at_pause,  # (#8) helps frontend pick filler
-    }
-
+# ── Podcast Q&A (streaming only) ──────────────────────────────────────
 
 # ── True Streaming Q&A — Claude streams, Inworld TTS fires at sentence boundaries ──
 
@@ -637,20 +400,6 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
             podcast_script = download_from_r2(topic.data[0]["podcast_script_url"]).decode("utf-8")
         except:
             pass
-
-    # Detect speakers
-    speaker_a = "HOST A"
-    speaker_b = "HOST B"
-    for line in podcast_script.split("\n")[:20]:
-        line = line.strip()
-        if ":" in line:
-            name = line.split(":")[0].strip()
-            if name and len(name) < 30 and not name.startswith("["):
-                if speaker_a == "HOST A":
-                    speaker_a = name
-                elif name != speaker_a:
-                    speaker_b = name
-                    break
 
     # Script context around pause
     script_context = ""

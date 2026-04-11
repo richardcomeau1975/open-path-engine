@@ -123,14 +123,14 @@ COLUMN_MAP = {
 R2_KEY_MAP = {
     "learning_asset": "{topic_id}/learning_asset.md",
     "podcast_script": "{topic_id}/podcast_script.md",
-    "podcast_audio": "{topic_id}/podcast_audio.wav",
+    "podcast_audio": "{topic_id}/podcast_audio.mp3",
     "notechart": "{topic_id}/notechart.json",
     "visual_overview_script": "{topic_id}/visual_overview_script.json",
 }
 
 # Multi-file types use patterns:
 #   visual_overview_images -> {topic_id}/images/slide_{N}.png
-#   narration_audio        -> {topic_id}/narration/slide_{N}.wav
+#   narration_audio        -> {topic_id}/narration/slide_{N}.mp3
 
 # Maps output type -> feature key for get_prompt_for_feature
 FEATURE_KEY_MAP = {
@@ -144,11 +144,11 @@ FEATURE_KEY_MAP = {
 CONTENT_TYPE_MAP = {
     "learning_asset": "text/markdown",
     "podcast_script": "text/markdown",
-    "podcast_audio": "audio/wav",
+    "podcast_audio": "audio/mpeg",
     "notechart": "application/json",
     "visual_overview_script": "application/json",
     "visual_overview_images": "image/png",
-    "narration_audio": "audio/wav",
+    "narration_audio": "audio/mpeg",
 }
 
 # Columns that hold JSONB arrays (multi-file outputs)
@@ -244,7 +244,7 @@ async def _generate_text_output(
             student_id=student_id,
             course_id=course_id,
         )
-        result_text = await _call_claude(prompt, model="claude-opus-4-20250514", max_tokens=16384)
+        result_text = await _call_claude(prompt, model="claude-opus-4-6", max_tokens=16384)
         await store_learning_asset_result(topic_id, sb, result_text)
 
     elif output_type == "podcast_script":
@@ -609,7 +609,7 @@ async def generate_test_output(
 
     # Determine model and max_tokens
     if output_type == "learning_asset":
-        model = "claude-opus-4-20250514"
+        model = "claude-opus-4-6"
         max_tokens = 16384
     elif output_type == "podcast_script":
         model = "claude-sonnet-4-6"

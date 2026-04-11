@@ -14,7 +14,7 @@ from app.services.modifier_assembly import gather_modifiers
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-4-20250514"
+MODEL = "claude-opus-4-6"
 MAX_TOKENS = 16384
 
 
