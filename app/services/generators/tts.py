@@ -141,7 +141,7 @@ async def inworld_tts(text: str, voice_id: str = "Kelsey", get_timestamps: bool 
     if get_timestamps:
         payload["timestampType"] = "WORD"
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
             "https://api.inworld.ai/tts/v1/voice",
             headers={

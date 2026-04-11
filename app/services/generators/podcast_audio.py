@@ -67,7 +67,18 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
             await asyncio.sleep(1)
         logger.info(f"Lecture audio [{topic_id}] — TTS chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
 
-        result = await inworld_tts(chunk, voice_id="Kelsey", get_timestamps=True)
+        # Retry logic for TTS chunks
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                result = await inworld_tts(chunk, voice_id="Kelsey", get_timestamps=True)
+                break
+            except Exception as e:
+                if attempt < max_retries:
+                    logger.warning(f"Lecture audio [{topic_id}] — TTS chunk {i+1}/{len(chunks)} failed (attempt {attempt+1}), retrying: {e}")
+                    await asyncio.sleep(2)
+                else:
+                    raise
 
         if not result["audio"]:
             logger.error(f"Lecture audio [{topic_id}] — chunk {i+1} no audio")
