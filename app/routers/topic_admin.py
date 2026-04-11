@@ -454,7 +454,7 @@ async def upload_admin_output(
             if output_type == "visual_overview_images":
                 r2_key = f"{topic_id}/images/slide_{i}.png"
             else:  # narration_audio
-                r2_key = f"{topic_id}/narration/slide_{i}.wav"
+                r2_key = f"{topic_id}/narration/slide_{i}.mp3"
             upload_bytes_to_r2(r2_key, data, content_type=content_type)
             keys.append(r2_key)
 

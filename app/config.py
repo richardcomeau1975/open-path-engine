@@ -15,7 +15,6 @@ class Settings:
     # Supabase
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_SERVICE_KEY: str = os.getenv("SUPABASE_SERVICE_KEY", "")
-    SUPABASE_PUBLISHABLE_KEY: str = os.getenv("SUPABASE_PUBLISHABLE_KEY", "")
 
     # Clerk
     CLERK_PUBLISHABLE_KEY: str = os.getenv("CLERK_PUBLISHABLE_KEY", "")
@@ -23,16 +22,12 @@ class Settings:
     CLERK_WEBHOOK_SECRET: str = os.getenv("CLERK_WEBHOOK_SECRET", "")
 
     # Cloudflare R2
-    R2_ACCOUNT_ID: str = os.getenv("R2_ACCOUNT_ID", "")
     R2_ACCESS_KEY_ID: str = os.getenv("R2_ACCESS_KEY_ID", "")
     R2_SECRET_ACCESS_KEY: str = os.getenv("R2_SECRET_ACCESS_KEY", "")
     R2_BUCKET_NAME: str = os.getenv("R2_BUCKET_NAME", "")
     R2_ENDPOINT: str = os.getenv("R2_ENDPOINT", "")
 
     # Hosting
-    RENDER_URL: str = os.getenv("RENDER_URL", "")
-    STUDENT_APP_URL: str = os.getenv("STUDENT_APP_URL", "")
-    ADMIN_APP_URL: str = os.getenv("ADMIN_APP_URL", "")
     ALLOWED_ORIGINS: str = os.getenv("ALLOWED_ORIGINS", "")
 
     # Admin

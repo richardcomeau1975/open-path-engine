@@ -113,6 +113,12 @@ async def travel_realtime(browser_ws: WebSocket):
     WebSocket proxy: browser ↔ this server ↔ Inworld Realtime API.
     Browser sends mic audio, receives audio chunks back.
     """
+    # Basic auth check — verify token in query params
+    token = browser_ws.query_params.get("token")
+    if not token:
+        await browser_ws.close(code=4001, reason="Missing auth token")
+        return
+
     await browser_ws.accept()
     logger.info("Browser connected to /api/travel/realtime")
 

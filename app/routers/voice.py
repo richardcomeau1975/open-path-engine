@@ -5,7 +5,6 @@ import anthropic
 import httpx
 import json
 import base64
-import struct
 import asyncio
 from datetime import datetime
 
@@ -57,63 +56,6 @@ async def transcribe_audio(request: Request, student: dict = Depends(get_current
 
     return {"transcript": transcript}
 
-
-@router.post("/speak")
-async def text_to_speech(request: Request, student: dict = Depends(get_current_student)):
-    body = await request.json()
-    text = body.get("text", "").strip()
-
-    if not text:
-        raise HTTPException(400, "No text provided")
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key={settings.GOOGLE_CLOUD_API_KEY}",
-            json={
-                "contents": [{"parts": [{"text": text}]}],
-                "generationConfig": {
-                    "response_modalities": ["AUDIO"],
-                    "speech_config": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": {"voiceName": "Kore"}
-                        }
-                    }
-                }
-            },
-            timeout=60.0,
-        )
-
-    if response.status_code != 200:
-        raise HTTPException(502, f"Gemini TTS error: {response.status_code}")
-
-    result = response.json()
-
-    try:
-        audio_b64 = result["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-        audio_bytes = base64.b64decode(audio_b64)
-    except (KeyError, IndexError):
-        raise HTTPException(502, "Failed to extract audio from Gemini response")
-
-    # Raw PCM 16-bit 24kHz mono → WAV
-    sample_rate = 24000
-    num_channels = 1
-    bits_per_sample = 16
-    data_size = len(audio_bytes)
-    header = struct.pack(
-        '<4sI4s4sIHHIIHH4sI',
-        b'RIFF', 36 + data_size, b'WAVE',
-        b'fmt ', 16, 1, num_channels, sample_rate,
-        sample_rate * num_channels * bits_per_sample // 8,
-        num_channels * bits_per_sample // 8, bits_per_sample,
-        b'data', data_size,
-    )
-    wav_bytes = header + audio_bytes
-
-    return StreamingResponse(
-        iter([wav_bytes]),
-        media_type="audio/wav",
-        headers={"Content-Length": str(len(wav_bytes))},
-    )
 
 
 @router.post("/walkthrough/{topic_id}/voice-message")
@@ -322,21 +264,16 @@ async def get_filler_urls(student: dict = Depends(get_current_student)):
 
 
 def _has_tts_chunk(buffer: str) -> bool:
-    """Check if buffer has a complete sentence or speaker turn to TTS."""
+    """Check if buffer has a complete sentence to TTS."""
     import re
     if re.search(r'[.!?]\s', buffer):
-        return True
-    if re.search(r'\n\s*(HOST\s*[AB]|[A-Z][a-z]+)\s*:', buffer):
         return True
     return False
 
 
 def _extract_tts_chunk(buffer: str) -> tuple:
-    """Extract first complete sentence or speaker turn. Returns (chunk, remaining)."""
+    """Extract first complete sentence. Returns (chunk, remaining)."""
     import re
-    speaker_match = re.search(r'\n\s*(?=(?:HOST\s*[AB]|[A-Z][a-z]+)\s*:)', buffer)
-    if speaker_match and speaker_match.start() > 10:
-        return buffer[:speaker_match.start()], buffer[speaker_match.start():]
     sentence_match = re.search(r'([.!?])\s', buffer)
     if sentence_match:
         end = sentence_match.end()

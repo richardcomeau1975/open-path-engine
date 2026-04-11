@@ -32,12 +32,7 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     for match in re.finditer(r'\[ANCHOR:\s*"([^"]+)"\]', script):
         anchors.append({"text": match.group(1), "char_position": match.start()})
 
-    # Extract image prompts before cleaning
-    image_prompts = []
-    for match in re.finditer(r'\[IMAGE_PROMPT:\s*"([^"]+)"\]', script):
-        image_prompts.append({"text": match.group(1), "char_position": match.start()})
-
-    # Clean script for TTS — remove anchors and image prompts
+    # Clean script for TTS — remove anchors, image prompts, and speaker labels
     clean_script = re.sub(r'\[ANCHOR:\s*"[^"]+"\]', '', script)
     clean_script = re.sub(r'\[IMAGE_PROMPT:\s*"[^"]+"\]', '', clean_script)
     # Strip speaker labels — TTS should not read them aloud

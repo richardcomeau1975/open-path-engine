@@ -20,7 +20,7 @@ async def generate_narration_audio(topic_id: str, supabase_client) -> list[str]:
 
     1. Download visual_overview_script.json from R2
     2. For each slide, generate single-speaker audio from the narration text
-    3. Store each WAV on R2
+    3. Store each MP3 on R2
     4. Update topic row with audio URL list
 
     Returns list of R2 keys.
