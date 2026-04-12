@@ -14,5 +14,5 @@ openpyxl==3.1.5
 httpx>=0.24.0,<1
 pyjwt[crypto]>=2.10.1
 svix==1.60.0
-openai>=1.30.0
+openai>=1.66.0
 pyyaml>=6.0
