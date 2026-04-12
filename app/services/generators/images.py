@@ -1,35 +1,33 @@
 """
 Image generator.
-Uses OpenAI Responses API with gpt-image-1.5 for style-consistent editorial illustrations.
+Uses OpenAI Images edit endpoint with gpt-image-1.5 for style-consistent editorial illustrations.
 Reference image on R2 defines the visual style via style transfer.
 """
 
 import json
 import base64
 import logging
-import httpx
 from openai import OpenAI
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_bytes_to_r2
 
 logger = logging.getLogger(__name__)
 
-# Cached reference image (base64 encoded)
-_cached_reference_image = None
+# Cached reference image bytes
+_cached_reference_bytes = None
 
 
-def _get_reference_image_b64() -> str:
+def _get_reference_image_bytes() -> bytes:
     """Download and cache the style reference image from R2."""
-    global _cached_reference_image
-    if _cached_reference_image is None:
+    global _cached_reference_bytes
+    if _cached_reference_bytes is None:
         try:
-            img_bytes = download_from_r2("editorial_illustration.jpeg")
-            _cached_reference_image = base64.b64encode(img_bytes).decode("utf-8")
-            logger.info(f"Images — loaded reference image from R2 ({len(img_bytes)} bytes)")
+            _cached_reference_bytes = download_from_r2("editorial_illustration.jpeg")
+            logger.info(f"Images — loaded reference image from R2 ({len(_cached_reference_bytes)} bytes)")
         except Exception as e:
             logger.error(f"Images — failed to load reference image: {e}")
-            _cached_reference_image = ""
-    return _cached_reference_image
+            _cached_reference_bytes = b""
+    return _cached_reference_bytes
 
 
 STYLE_PROMPT = (
@@ -52,7 +50,7 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
 
     1. Download visual_overview_script.json from R2
     2. Parse out image_prompt for each slide
-    3. Call OpenAI Responses API with reference image for style transfer
+    3. Call OpenAI Images edit endpoint with reference image for style transfer
     4. Store images on R2
     5. Update topic row with image URL list
 
@@ -87,9 +85,9 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
         raise ValueError(f"Visual overview script is not valid JSON: {e}")
 
     # Load reference image for style transfer
-    ref_b64 = _get_reference_image_b64()
-    if not ref_b64:
-        logger.warning(f"Images [{topic_id}] — no reference image available, generating without style reference")
+    ref_bytes = _get_reference_image_bytes()
+    if not ref_bytes:
+        logger.warning(f"Images [{topic_id}] — no reference image available, will generate without style reference")
 
     image_keys = []
     client = OpenAI(api_key=settings.OPENAI_API_KEY)
@@ -107,47 +105,41 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
         full_prompt = f"{STYLE_PROMPT}SCENE TO ILLUSTRATE:\n{image_prompt}"
 
         try:
-            # Build input with reference image for style transfer
-            input_content = []
+            if ref_bytes:
+                # Use edit endpoint with reference image for style transfer
+                import io
+                ref_file = io.BytesIO(ref_bytes)
+                ref_file.name = "reference.jpeg"
 
-            # Add reference image if available
-            if ref_b64:
-                input_content.append({
-                    "type": "input_image",
-                    "image_url": f"data:image/jpeg;base64,{ref_b64}",
-                })
+                response = client.images.edit(
+                    model="gpt-image-1.5",
+                    image=ref_file,
+                    prompt=full_prompt,
+                    size="1536x1024",
+                    quality="medium",
+                )
+            else:
+                # Fallback: generate without reference
+                response = client.images.generate(
+                    model="gpt-image-1.5",
+                    prompt=full_prompt,
+                    size="1536x1024",
+                    quality="medium",
+                )
 
-            # Add the generation prompt
-            input_content.append({
-                "type": "input_text",
-                "text": full_prompt,
-            })
-
-            response = client.responses.create(
-                model="gpt-4.1",
-                input=[{
-                    "role": "user",
-                    "content": input_content,
-                }],
-                tools=[{
-                    "type": "image_generation",
-                    "quality": "medium",
-                    "size": "1536x1024",
-                }],
-            )
-
-            # Extract image from response
-            image_b64 = None
-            for output in response.output:
-                if output.type == "image_generation_call":
-                    image_b64 = output.result
-                    break
-
+            image_b64 = response.data[0].b64_json
             if not image_b64:
-                logger.error(f"Images [{topic_id}] — no image returned for slide {slide_num}")
-                continue
-
-            image_bytes = base64.b64decode(image_b64)
+                # Some responses return URL instead of b64
+                import httpx
+                image_url = response.data[0].url
+                if image_url:
+                    async with httpx.AsyncClient(timeout=60.0) as http_client:
+                        img_response = await http_client.get(image_url)
+                    image_bytes = img_response.content
+                else:
+                    raise ValueError(f"No image data returned for slide {slide_num}")
+            else:
+                image_bytes = base64.b64decode(image_b64)
 
         except Exception as e:
             logger.error(f"Images [{topic_id}] — generation failed for slide {slide_num}: {e}")
