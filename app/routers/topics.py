@@ -45,9 +45,9 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
 
     features = [
         {"number": 1, "key": "visual_overview", "name": "Visual Overview", "description": "Build Your Foundation"},
-        {"number": 2, "key": "podcast", "name": "Podcast", "description": "Listen & Explore"},
-        {"number": 3, "key": "walkthrough", "name": "Knowledge Walkthrough", "description": "Think It Through"},
-        {"number": 4, "key": "notechart", "name": "Active Recall", "description": "Test Your Recall"},
+        {"number": 2, "key": "lectures", "name": "Lectures", "description": "Listen & Learn"},
+        {"number": 3, "key": "walkthrough", "name": "Knowledge Consolidator", "description": "Think It Through"},
+        {"number": 4, "key": "notechart", "name": "Notes", "description": "Test Your Recall"},
         {"number": 5, "key": "how_tested", "name": "How You're Tested", "description": "Know the Format"},
         {"number": 6, "key": "test_me", "name": "Test Me", "description": "Check Your Understanding"},
     ]
@@ -55,7 +55,7 @@ async def get_topic_dashboard(topic_id: str, student: dict = Depends(get_current
     # Check actual content availability
     content_available = {
         "visual_overview": bool(topic_data.get("visual_overview_images") and len(topic_data.get("visual_overview_images", [])) > 0),
-        "podcast": bool(topic_data.get("podcast_audio_url")),
+        "lectures": bool(topic_data.get("podcast_audio_url")),
         "walkthrough": bool(topic_data.get("learning_asset_url")),
         "notechart": bool(topic_data.get("notechart_url")),
         "how_tested": True,
@@ -100,11 +100,11 @@ async def get_topic_status(topic_id: str, student: dict = Depends(get_current_st
     # Build feature availability map
     features = {
         "visual_overview": bool(topic.get("visual_overview_images") and len(topic.get("visual_overview_images", [])) > 0),
-        "podcast": bool(topic.get("podcast_audio_url")),
+        "lectures": bool(topic.get("podcast_audio_url")),
         "walkthrough": bool(topic.get("learning_asset_url")),
         "notechart": bool(topic.get("notechart_url")),
-        "how_tested": True,  # Requires exam upload — Phase 2
-        "test_me": bool(topic.get("learning_asset_url")),     # Requires testing profile — Phase 2
+        "how_tested": True,
+        "test_me": bool(topic.get("learning_asset_url")),
     }
 
     return {

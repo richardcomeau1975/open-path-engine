@@ -127,12 +127,37 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
         topic_id=topic_id,
     )
 
-    # Load the learning asset
+    # Load the learning asset (segment-specific or full)
     topic_data = supabase.table("topics").select("learning_asset_url").eq("id", topic_id).execute()
     learning_asset_url = topic_data.data[0].get("learning_asset_url") if topic_data.data else None
 
     learning_asset = ""
-    if learning_asset_url:
+
+    # For segment tutorials, try to load segment-specific content
+    if session["mode"] == "segment_tutorial":
+        segment_num = (session.get("metadata") or {}).get("segment_number", 1)
+        try:
+            seg_asset = download_from_r2(f"{topic_id}/segments/segment_{segment_num}.yaml").decode("utf-8")
+            learning_asset = seg_asset
+        except Exception:
+            pass  # Fall through to full asset
+
+        # Append anchor context from lecture manifest
+        try:
+            import json as _json
+            manifest = _json.loads(download_from_r2(f"{topic_id}/lecture/manifest.json").decode("utf-8"))
+            seg_info = manifest["segments"][segment_num - 1]
+            anchors = seg_info.get("anchors", [])
+            if anchors:
+                learning_asset += "\n\n# KEY MOMENTS FROM THE LECTURE\nThe student just heard a lecture where these ideas crystallized:\n"
+                for anchor in anchors:
+                    learning_asset += f"- {anchor}\n"
+                learning_asset += "\nThe tutorial should test whether the student genuinely arrived at these understandings — not by asking what the lecture said, but by making them USE the ideas.\n"
+        except Exception:
+            pass
+
+    # Fallback to full learning asset if nothing loaded yet
+    if not learning_asset and learning_asset_url:
         try:
             asset_bytes = download_from_r2(learning_asset_url)
             learning_asset = asset_bytes.decode("utf-8")

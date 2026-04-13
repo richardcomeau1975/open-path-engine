@@ -289,6 +289,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
     text_question = body.get("text")
     paused_at = body.get("pausedAt", 0)
     history = body.get("history", [])
+    segment_number = body.get("segment_number")  # optional — for segmented lectures
 
     supabase = get_supabase()
 
@@ -332,7 +333,14 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
             pass
 
     podcast_script = ""
-    if topic.data[0].get("podcast_script_url"):
+    if segment_number:
+        # Load segment-specific script for context
+        try:
+            podcast_script = download_from_r2(f"{topic_id}/lecture/segment_{segment_number}.md").decode("utf-8")
+        except:
+            pass
+    if not podcast_script and topic.data[0].get("podcast_script_url"):
+        # Fallback to full script
         try:
             podcast_script = download_from_r2(topic.data[0]["podcast_script_url"]).decode("utf-8")
         except:
