@@ -71,10 +71,15 @@ async def start_session(topic_id: str, request: Request, student: dict = Depends
         "completion_state": "in_progress",
     }
 
+    # Segment tutorial: store segment number in metadata
+    if mode == "segment_tutorial":
+        segment_number = body.get("segment_number", 1)
+        session_data["metadata"] = {"segment_number": segment_number}
+
     # Admin can provide a test prompt for this session
     test_prompt = body.get("test_prompt")
     if test_prompt and student.get("is_admin"):
-        session_data["metadata"] = {"test_prompt": test_prompt}
+        session_data.setdefault("metadata", {})["test_prompt"] = test_prompt
 
     result = supabase.table("walkthrough_sessions").insert(session_data).execute()
 
