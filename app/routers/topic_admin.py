@@ -537,15 +537,29 @@ async def generate_admin_output(
             _generation_progress[topic_id]["current"] = None
             logger.info(f"admin generate [{topic_id}] — {output_type} completed")
 
-            # Auto-chain: podcast_script → podcast_audio
+            # Auto-chain: podcast_script → split segments → podcast_audio → lecture images
             if output_type == "podcast_script":
                 try:
+                    # Step 1: Split into segments
+                    logger.info(f"admin generate [{topic_id}] — auto-splitting lecture into segments")
+                    from app.services.generators.lecture_segments import split_and_store_segments
+                    manifest = await split_and_store_segments(topic_id, bg_sb)
+                    logger.info(f"admin generate [{topic_id}] — split into {manifest['segment_count']} segments")
+
+                    # Step 2: Generate audio per segment
                     logger.info(f"admin generate [{topic_id}] — auto-chaining to podcast_audio")
                     from app.services.generators.podcast_audio import generate_podcast_audio
                     await generate_podcast_audio(topic_id, bg_sb)
                     logger.info(f"admin generate [{topic_id}] — podcast_audio auto-chain completed")
+
+                    # Step 3: Generate images per segment
+                    logger.info(f"admin generate [{topic_id}] — auto-chaining to lecture images")
+                    from app.services.generators.images import generate_lecture_images
+                    await generate_lecture_images(topic_id, bg_sb)
+                    logger.info(f"admin generate [{topic_id}] — lecture images auto-chain completed")
+
                 except Exception as e:
-                    logger.error(f"admin generate [{topic_id}] — podcast_audio auto-chain failed: {e}")
+                    logger.error(f"admin generate [{topic_id}] — auto-chain failed: {e}")
 
         except Exception as e:
             _update_step_status(topic_id, output_type, "failed", str(e))

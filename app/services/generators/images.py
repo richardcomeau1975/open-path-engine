@@ -32,15 +32,20 @@ def _get_reference_image_bytes() -> bytes:
 
 STYLE_PROMPT = (
     "STYLE INSTRUCTIONS — match the reference image precisely:\n"
-    "Thin, confident ink line art — clean single-weight lines, NOT thick cartoon outlines. "
-    "Minimal color: desaturated watercolor washes applied sparingly. Most of the image is line work with color only as accent. "
-    "Background: near-white with barely perceptible warmth — NOT yellow, NOT cream, NOT tan. Think white paper with a hint of warmth. "
-    "Proportions: naturalistic and anatomically correct — NOT exaggerated, NOT cartoonish, NOT children's book. "
-    "The feeling is a sophisticated editorial illustration from The New Yorker or Monocle — restrained, elegant, understated. "
-    "Generous negative space in the upper third for text overlay. "
+    "Ink line art with selective watercolor color — NOT monochrome. Use real color where it matters: "
+    "skin tones, clothing, objects. Color should feel like hand-applied watercolor washes — "
+    "warm and natural, not digital or flat. "
+    "Lines: thin, confident, single-weight ink. NOT thick cartoon outlines. "
+    "Background: very light, nearly white. NOT yellow, NOT heavy cream. "
+    "Proportions: naturalistic, anatomically correct. NOT cartoonish, NOT exaggerated. "
+    "Composition: generous negative space in the upper third for text overlay. "
+    "Subject positioned in the lower two-thirds. "
+    "The feeling: a sophisticated editorial illustration you'd see in a long-form magazine article. "
+    "Warm, human, specific — not generic or clip-art-like. "
     "No text, labels, captions, or words anywhere in the image. "
-    "No logos, UI elements, or diagrams. "
-    "AVOID: heavy saturation, thick outlines, exaggerated features, bright colors, busy compositions, cartoon proportions.\n\n"
+    "No logos, UI elements, diagrams, or geometric shapes. "
+    "AVOID: monochrome, desaturated, thick outlines, exaggerated features, busy compositions, "
+    "abstract shapes, diagrams, cartoon proportions, children's book style.\n\n"
 )
 
 
@@ -157,4 +162,95 @@ async def generate_images(topic_id: str, supabase_client) -> list[str]:
     }).eq("id", topic_id).execute()
 
     logger.info(f"Images [{topic_id}] — generated {len(image_keys)} images")
+    return image_keys
+
+
+async def generate_lecture_images(topic_id: str, supabase_client) -> list[str]:
+    """
+    Generate images from lecture segment [IMAGE_PROMPT] markers.
+    Reads from the lecture manifest instead of visual_overview_script.json.
+    """
+    import io
+
+    # Load manifest
+    try:
+        manifest_bytes = download_from_r2(f"{topic_id}/lecture/manifest.json")
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"No lecture manifest found for topic {topic_id}: {e}")
+
+    ref_bytes = _get_reference_image_bytes()
+    if not ref_bytes:
+        logger.warning(f"Images [{topic_id}] — no reference image, generating without style reference")
+
+    image_keys = []
+    client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+    for seg in manifest["segments"]:
+        seg_num = seg["number"]
+        image_prompt = seg.get("image_prompt", "")
+
+        if not image_prompt:
+            logger.warning(f"Images [{topic_id}] — segment {seg_num} has no image_prompt, skipping")
+            continue
+
+        logger.info(f"Images [{topic_id}] — generating image for segment {seg_num}: {image_prompt[:80]}...")
+
+        full_prompt = f"{STYLE_PROMPT}SCENE TO ILLUSTRATE:\n{image_prompt}"
+
+        try:
+            if ref_bytes:
+                ref_file = io.BytesIO(ref_bytes)
+                ref_file.name = "reference.jpeg"
+
+                response = client.images.edit(
+                    model="gpt-image-1.5",
+                    image=ref_file,
+                    prompt=full_prompt,
+                    size="1536x1024",
+                    quality="medium",
+                )
+            else:
+                response = client.images.generate(
+                    model="gpt-image-1.5",
+                    prompt=full_prompt,
+                    size="1536x1024",
+                    quality="medium",
+                )
+
+            image_b64 = response.data[0].b64_json
+            if not image_b64:
+                import httpx
+                image_url = response.data[0].url
+                if image_url:
+                    async with httpx.AsyncClient(timeout=60.0) as http_client:
+                        img_response = await http_client.get(image_url)
+                    image_bytes = img_response.content
+                else:
+                    raise ValueError(f"No image data returned for segment {seg_num}")
+            else:
+                image_bytes = base64.b64decode(image_b64)
+
+        except Exception as e:
+            logger.error(f"Images [{topic_id}] — generation failed for segment {seg_num}: {e}")
+            raise
+
+        # Store on R2
+        r2_key = f"{topic_id}/lecture/segment_{seg_num}.png"
+        upload_bytes_to_r2(r2_key, image_bytes, content_type="image/png")
+        image_keys.append(r2_key)
+        seg["image_url"] = r2_key
+
+        logger.info(f"Images [{topic_id}] — stored segment {seg_num} image ({len(image_bytes)} bytes)")
+
+    # Update manifest with image URLs
+    manifest_key = f"{topic_id}/lecture/manifest.json"
+    upload_text_to_r2(manifest_key, json.dumps(manifest, indent=2))
+
+    # Also update topic row for backward compat
+    supabase_client.table("topics").update({
+        "visual_overview_images": image_keys
+    }).eq("id", topic_id).execute()
+
+    logger.info(f"Images [{topic_id}] — generated {len(image_keys)} lecture images")
     return image_keys

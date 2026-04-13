@@ -101,6 +101,26 @@ async def get_topic_content(topic_id: str, request: Request, student: dict = Dep
     except Exception:
         pass
 
+    # Load lecture segments manifest if it exists
+    try:
+        manifest_bytes = download_from_r2(f"{topic_id}/lecture/manifest.json")
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+
+        # Generate presigned URLs for each segment's assets
+        for seg in manifest["segments"]:
+            if seg.get("audio_url"):
+                seg["audio"] = generate_presigned_url(seg["audio_url"])
+            if seg.get("image_url"):
+                seg["image"] = generate_presigned_url(seg["image_url"])
+            if seg.get("timestamps_url"):
+                seg["timestamps"] = json.loads(
+                    download_from_r2(seg["timestamps_url"]).decode("utf-8")
+                )
+
+        content["lecture_segments"] = manifest["segments"]
+    except Exception:
+        content["lecture_segments"] = None
+
     return content
 
 
