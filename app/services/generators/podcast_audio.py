@@ -1,7 +1,7 @@
 """
 Lecture audio generator.
-Uses Gemini multi-speaker TTS with 4 voices:
-  AEODE (co-teacher), CHARON (co-teacher), KORE (student), ZEPHYR (student).
+Uses Gemini multi-speaker TTS with 2 voices (Gemini's hard limit):
+  EXPERT (Aoede voice), HOST (Charon voice).
 Speaker labels in the script are PRESERVED so Gemini can route each line.
 Stores WAV audio + timestamp JSON on R2.
 """
@@ -23,12 +23,10 @@ SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
-# Gemini multi-speaker voice mapping (speaker label in script → Gemini prebuilt voice)
+# Gemini multi-speaker voice mapping (hard limit: 2 speakers)
 SPEAKER_VOICE_CONFIGS = [
-    {"speaker": "AEODE", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}},
-    {"speaker": "CHARON", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}},
-    {"speaker": "KORE", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
-    {"speaker": "ZEPHYR", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Zephyr"}}},
+    {"speaker": "EXPERT", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}},
+    {"speaker": "HOST", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}},
 ]
 
 
@@ -49,7 +47,7 @@ def _pcm_to_wav(pcm_data: bytes) -> bytes:
 def _clean_script_for_gemini(script: str) -> str:
     """
     Clean script for Gemini multi-speaker TTS.
-    KEEP speaker labels (AEODE/CHARON/KORE/ZEPHYR) — Gemini uses them to assign voices.
+    KEEP speaker labels (EXPERT/HOST) — Gemini uses them to assign voices.
     Remove markers only.
     """
     clean = re.sub(r'\[ANCHOR:\s*"[^"]+"\]', '', script)
@@ -65,7 +63,7 @@ def _chunk_by_speaker(text: str, max_chars: int = 4000) -> list[str]:
     Never breaks a speaker turn across chunks.
     """
     # Split into speaker turns — each starts with LABEL:
-    speaker_pattern = re.compile(r'^(AEODE|CHARON|KORE|ZEPHYR):', re.MULTILINE)
+    speaker_pattern = re.compile(r'^(EXPERT|HOST):', re.MULTILINE)
     starts = [m.start() for m in speaker_pattern.finditer(text)]
 
     if not starts:
