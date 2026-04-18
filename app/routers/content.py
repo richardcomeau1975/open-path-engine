@@ -11,7 +11,7 @@ from app.config import settings
 from app.middleware.clerk_auth import get_current_student
 from app.services.supabase import get_supabase
 from app.services.file_parser import parse_file
-from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2, generate_presigned_url, generate_presigned_urls
+from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2, generate_presigned_url
 from app.services.prompt_lookup import get_prompt_for_feature
 from app.services.modifier_assembly import gather_modifiers
 

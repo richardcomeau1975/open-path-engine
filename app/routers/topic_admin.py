@@ -86,9 +86,6 @@ def _update_step_status(topic_id: str, step: str, step_status: str, error: str =
             entry["current"] = step
 
 
-def _clear_progress(topic_id: str):
-    _generation_progress.pop(topic_id, None)
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -121,9 +118,9 @@ COLUMN_MAP = {
 
 # Maps output type -> R2 key template (single-file types only)
 R2_KEY_MAP = {
-    "learning_asset": "{topic_id}/learning_asset.md",
+    "learning_asset": "{topic_id}/learning_asset.yaml",
     "podcast_script": "{topic_id}/podcast_script.md",
-    "podcast_audio": "{topic_id}/podcast_audio.mp3",
+    "podcast_audio": "{topic_id}/podcast_audio.wav",
     "notechart": "{topic_id}/notechart.json",
     "visual_overview_script": "{topic_id}/visual_overview_script.json",
 }
@@ -660,13 +657,14 @@ async def generate_test_output(
 DOWNSTREAM_MAP = {
     "learning_asset": [
         "podcast_script",
+        "podcast_audio",
         "notechart",
         "visual_overview_script",
         "visual_overview_images",
-        "podcast_audio",
         "narration_audio",
     ],
     "podcast_script": [
+        "podcast_script",
         "podcast_audio",
     ],
     "visual_overview_script": [
@@ -682,7 +680,7 @@ async def clear_downstream(
     output_type: str,
     student: dict = Depends(require_admin_student),
 ):
-    """Clear all downstream outputs from the given type (inclusive)."""
+    """Clear all downstream outputs from the given type (inclusive). Also deletes R2 files."""
     if output_type not in DOWNSTREAM_MAP:
         raise HTTPException(status_code=400, detail=f"No downstream map for '{output_type}'")
 
@@ -691,16 +689,36 @@ async def clear_downstream(
 
     to_clear = DOWNSTREAM_MAP[output_type]
     cleared = []
+    r2_deleted = 0
+
+    from app.services.r2 import delete_from_r2, delete_r2_prefix
 
     for step in to_clear:
         col = COLUMN_MAP[step]
+
+        # Delete R2 files for this step
+        if step in R2_KEY_MAP:
+            r2_key = R2_KEY_MAP[step].format(topic_id=topic_id)
+            if delete_from_r2(r2_key):
+                r2_deleted += 1
+        if step == "visual_overview_images":
+            r2_deleted += delete_r2_prefix(f"{topic_id}/images/")
+        if step == "narration_audio":
+            r2_deleted += delete_r2_prefix(f"{topic_id}/narration/")
+
+        # Clear Supabase column
         if step in ARRAY_COLUMNS:
             sb.table("topics").update({col: []}).eq("id", topic_id).execute()
         else:
             sb.table("topics").update({col: None}).eq("id", topic_id).execute()
         cleared.append(step)
 
-    return {"cleared": cleared}
+    # Always delete lecture segment files when clearing podcast_script or podcast_audio
+    if "podcast_script" in to_clear or "podcast_audio" in to_clear:
+        r2_deleted += delete_r2_prefix(f"{topic_id}/lecture/")
+
+    logger.info(f"clear-from [{topic_id}] — cleared {cleared}, deleted {r2_deleted} R2 files")
+    return {"cleared": cleared, "r2_files_deleted": r2_deleted}
 
 
 @router.post("/topics/{topic_id}/admin/generate-from/{output_type}")

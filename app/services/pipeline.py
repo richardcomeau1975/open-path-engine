@@ -139,6 +139,14 @@ async def run_pipeline(topic_id: str, supabase_client):
             await store_podcast_script_result(topic_id, supabase_client, ps_text)
             steps_completed.append("generate_podcast_script")
             logger.info(f"Pipeline [{topic_id}] — podcast script complete ({len(ps_text)} chars)")
+
+            # Split lecture into segments
+            try:
+                from app.services.generators.lecture_segments import split_and_store_segments
+                manifest = await split_and_store_segments(topic_id, supabase_client)
+                logger.info(f"Pipeline [{topic_id}] — split into {manifest['segment_count']} segments")
+            except Exception as e:
+                logger.error(f"Pipeline [{topic_id}] — segment split failed (continuing): {e}")
         else:
             errors.append("podcast_script batch request failed")
             logger.error(f"Pipeline [{topic_id}] — podcast script FAILED")

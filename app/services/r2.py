@@ -66,14 +66,35 @@ def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
     return url
 
 
-def generate_presigned_urls(keys: list[str], expires_in: int = 3600) -> dict[str, str]:
-    """
-    Generate presigned URLs for multiple R2 objects.
-    Returns a dict of {key: presigned_url}.
-    Skips keys that are None or empty.
-    """
-    result = {}
-    for key in keys:
-        if key:
-            result[key] = generate_presigned_url(key, expires_in)
-    return result
+def delete_from_r2(key: str) -> bool:
+    """Delete a single object from R2. Returns True if successful."""
+    r2 = get_r2_client()
+    try:
+        r2.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def delete_r2_prefix(prefix: str) -> int:
+    """Delete all objects under a given prefix from R2. Returns count deleted."""
+    r2 = get_r2_client()
+    count = 0
+    try:
+        response = r2.list_objects_v2(Bucket=settings.R2_BUCKET_NAME, Prefix=prefix)
+        objects = response.get("Contents", [])
+        for obj in objects:
+            r2.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=obj["Key"])
+            count += 1
+        while response.get("IsTruncated"):
+            response = r2.list_objects_v2(
+                Bucket=settings.R2_BUCKET_NAME,
+                Prefix=prefix,
+                ContinuationToken=response["NextContinuationToken"],
+            )
+            for obj in response.get("Contents", []):
+                r2.delete_object(Bucket=settings.R2_BUCKET_NAME, Key=obj["Key"])
+                count += 1
+    except Exception:
+        pass
+    return count

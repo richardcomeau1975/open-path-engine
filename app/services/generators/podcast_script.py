@@ -4,7 +4,7 @@ Uses Claude Sonnet via Batch API to generate a two-person podcast script from th
 """
 
 import logging
-from app.services.r2 import download_from_r2, upload_text_to_r2
+from app.services.r2 import upload_text_to_r2
 from app.services.prompt_lookup import get_prompt_for_feature
 from app.services.modifier_assembly import gather_modifiers
 

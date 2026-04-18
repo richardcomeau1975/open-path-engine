@@ -10,7 +10,6 @@ import logging
 import httpx
 import anthropic
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sse_starlette.sse import EventSourceResponse
 from starlette.responses import StreamingResponse
 from app.config import settings
 from app.middleware.clerk_auth import get_current_student

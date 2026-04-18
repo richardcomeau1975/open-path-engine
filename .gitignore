@@ -9,3 +9,8 @@ env/
 dist/
 build/
 .pytest_cache/
+
+# One-off audit outputs and migration scripts (may contain secrets)
+SYSTEM_AUDIT*.md
+FULL_CODE_DUMP*.md
+scripts/

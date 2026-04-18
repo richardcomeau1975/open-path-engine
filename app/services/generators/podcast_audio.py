@@ -45,6 +45,25 @@ def _pcm_to_wav(pcm_data: bytes) -> bytes:
     return header + pcm_data
 
 
+# Map any speaker label to EXPERT or HOST for the 2-voice TTS
+_SPEAKER_ALIAS = {
+    "EXPERT": "EXPERT",
+    "HOST": "HOST",
+    "AEODE": "EXPERT",
+    "CHARON": "HOST",
+    "TEACHER": "EXPERT",
+    "KORE": "HOST",
+    "ZEPHYR": "HOST",
+    "STUDENT": "HOST",
+    "STUDENT_CHLOE": "HOST",
+    "STUDENT_NATE": "HOST",
+    "STUDENT_MIA": "HOST",
+}
+
+_ALL_LABELS = "|".join(_SPEAKER_ALIAS.keys())
+_SPEAKER_RE = re.compile(rf'^({_ALL_LABELS}):', re.MULTILINE)
+
+
 def _clean_script_for_gemini(script: str) -> str:
     """
     Clean script for Gemini multi-speaker TTS.
@@ -63,8 +82,8 @@ def _chunk_by_speaker(text: str, max_chars: int = 4000) -> list[str]:
     Split text at speaker-line boundaries into chunks under max_chars.
     Never breaks a speaker turn across chunks.
     """
-    # Split into speaker turns — each starts with LABEL:
-    speaker_pattern = re.compile(r'^(EXPERT|HOST):', re.MULTILINE)
+    # Split into speaker turns — matches any known speaker label
+    speaker_pattern = _SPEAKER_RE
     starts = [m.start() for m in speaker_pattern.finditer(text)]
 
     if not starts:
@@ -102,27 +121,29 @@ def _chunk_by_speaker(text: str, max_chars: int = 4000) -> list[str]:
 
 def _parse_speaker_turns(script_text: str) -> list[dict]:
     """
-    Parse script text with EXPERT:/HOST: labels into structured turns
+    Parse script text with speaker labels into structured turns
     for the Cloud TTS multiSpeakerMarkup format.
+    Handles EXPERT/HOST, AEODE/CHARON, TEACHER, and student labels.
+    All labels are mapped to EXPERT or HOST (2-voice limit).
     """
     turns = []
-    # Split at each speaker label, keeping the label via lookahead
-    parts = re.split(r'\n(?=(?:EXPERT|HOST):)', script_text)
+    starts = [m.start() for m in _SPEAKER_RE.finditer(script_text)]
 
-    for part in parts:
-        part = part.strip()
-        if not part:
-            continue
+    if not starts:
+        logger.error(f"No speaker labels found. First 300 chars: {script_text[:300]}")
+        return turns
 
-        match = re.match(r'^(EXPERT|HOST):\s*(.*)', part, re.DOTALL)
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(script_text)
+        block = script_text[start:end].strip()
+
+        match = re.match(rf'^({_ALL_LABELS}):\s*(.*)', block, re.DOTALL)
         if match:
-            speaker = match.group(1)
+            raw_speaker = match.group(1)
             text = match.group(2).strip()
+            speaker = _SPEAKER_ALIAS.get(raw_speaker, "EXPERT")
             if text:
                 turns.append({"speaker": speaker, "text": text})
-        elif turns:
-            # Non-labeled text — append to previous speaker's turn
-            turns[-1]["text"] += " " + part
 
     return turns
 
@@ -133,7 +154,8 @@ async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClie
     """
     turns = _parse_speaker_turns(chunk_text)
     if not turns:
-        raise Exception("No speaker turns found in chunk")
+        logger.warning(f"No speaker turns in chunk, skipping. First 200 chars: {chunk_text[:200]}")
+        return b""  # Return empty audio — caller will skip
 
     payload = {
         "input": {
