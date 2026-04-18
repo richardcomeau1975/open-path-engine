@@ -1,8 +1,9 @@
 """
 Lecture audio generator.
-Uses Gemini multi-speaker TTS with 2 voices (Gemini's hard limit):
+Uses Google Cloud Text-to-Speech with Gemini multi-speaker model (2 voices):
   EXPERT (Aoede voice), HOST (Charon voice).
-Speaker labels in the script are PRESERVED so Gemini can route each line.
+Script is parsed into structured speaker turns and sent to the Cloud TTS
+text:synthesize endpoint. Returns LINEAR16 PCM, wrapped in WAV header.
 Stores WAV audio + timestamp JSON on R2.
 """
 
@@ -18,15 +19,15 @@ from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to
 
 logger = logging.getLogger(__name__)
 
-GEMINI_TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+CLOUD_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
-# Gemini multi-speaker voice mapping (hard limit: 2 speakers)
+# Cloud TTS multi-speaker voice mapping (hard limit: 2 speakers)
 SPEAKER_VOICE_CONFIGS = [
-    {"speaker": "EXPERT", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}},
-    {"speaker": "HOST", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}},
+    {"speakerAlias": "EXPERT", "speakerId": "Aoede"},
+    {"speakerAlias": "HOST", "speakerId": "Charon"},
 ]
 
 
@@ -99,37 +100,72 @@ def _chunk_by_speaker(text: str, max_chars: int = 4000) -> list[str]:
     return chunks
 
 
+def _parse_speaker_turns(script_text: str) -> list[dict]:
+    """
+    Parse script text with EXPERT:/HOST: labels into structured turns
+    for the Cloud TTS multiSpeakerMarkup format.
+    """
+    turns = []
+    # Split at each speaker label, keeping the label via lookahead
+    parts = re.split(r'\n(?=(?:EXPERT|HOST):)', script_text)
+
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        match = re.match(r'^(EXPERT|HOST):\s*(.*)', part, re.DOTALL)
+        if match:
+            speaker = match.group(1)
+            text = match.group(2).strip()
+            if text:
+                turns.append({"speaker": speaker, "text": text})
+        elif turns:
+            # Non-labeled text — append to previous speaker's turn
+            turns[-1]["text"] += " " + part
+
+    return turns
+
+
 async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient) -> bytes:
     """
-    Call Gemini multi-speaker TTS with 4 voices. Returns raw PCM bytes.
+    Call Google Cloud Text-to-Speech with Gemini multi-speaker. Returns raw PCM bytes.
     """
-    prompt = f"TTS the following classroom dialogue:\n\n{chunk_text}"
+    turns = _parse_speaker_turns(chunk_text)
+    if not turns:
+        raise Exception("No speaker turns found in chunk")
 
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "multiSpeakerVoiceConfig": {
-                    "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
-                }
+        "input": {
+            "prompt": "Read the following dialogue naturally, matching each speaker's personality.",
+            "multiSpeakerMarkup": {
+                "turns": turns,
             },
-            "temperature": 2.0,
+        },
+        "voice": {
+            "languageCode": "en-us",
+            "modelName": "gemini-2.5-flash-preview-tts",
+            "multiSpeakerVoiceConfig": {
+                "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
+            },
+        },
+        "audioConfig": {
+            "audioEncoding": "LINEAR16",
+            "sampleRateHertz": SAMPLE_RATE,
         },
     }
 
-    url = f"{GEMINI_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}"
+    url = f"{CLOUD_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}"
     response = await tts_client.post(url, json=payload)
 
     if response.status_code != 200:
-        logger.error(f"Gemini TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
-        raise Exception(f"Gemini TTS failed: HTTP {response.status_code} — {response.text[:200]}")
+        logger.error(f"Cloud TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
+        raise Exception(f"Cloud TTS failed: HTTP {response.status_code} — {response.text[:200]}")
 
     data = response.json()
-    try:
-        audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-    except (KeyError, IndexError) as e:
-        raise Exception(f"Gemini TTS response malformed: {e} — body: {str(data)[:300]}")
+    audio_b64 = data.get("audioContent")
+    if not audio_b64:
+        raise Exception(f"Cloud TTS response missing audioContent — body: {str(data)[:300]}")
 
     return base64.b64decode(audio_b64)
 
