@@ -1,141 +1,203 @@
 """
 Lecture audio generator.
-Uses Inworld TTS (voice: Kelsey) with word-level timestamps.
-Supports per-segment generation via lecture manifest, with full-script fallback.
-Stores MP3 audio + timestamp JSON on R2.
+Uses Gemini multi-speaker TTS with 4 voices:
+  AEODE (co-teacher), CHARON (co-teacher), KORE (student), ZEPHYR (student).
+Speaker labels in the script are PRESERVED so Gemini can route each line.
+Stores WAV audio + timestamp JSON on R2.
 """
 
 import asyncio
 import base64
 import json
 import re
+import struct
 import logging
+import httpx
+from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2
-from app.services.generators.tts import inworld_tts
 
 logger = logging.getLogger(__name__)
 
+GEMINI_TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+SAMPLE_RATE = 24000
+CHANNELS = 1
+SAMPLE_WIDTH = 2  # 16-bit PCM
 
-def _clean_script_for_tts(script: str) -> str:
-    """Remove markers and speaker labels so TTS gets clean text."""
+# Gemini multi-speaker voice mapping (speaker label in script → Gemini prebuilt voice)
+SPEAKER_VOICE_CONFIGS = [
+    {"speaker": "AEODE", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}},
+    {"speaker": "CHARON", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}},
+    {"speaker": "KORE", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}},
+    {"speaker": "ZEPHYR", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Zephyr"}}},
+]
+
+
+def _pcm_to_wav(pcm_data: bytes) -> bytes:
+    """Wrap raw PCM data (16-bit, 24kHz, mono) in a WAV header."""
+    data_size = len(pcm_data)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_size, b'WAVE',
+        b'fmt ', 16, 1, CHANNELS, SAMPLE_RATE,
+        SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH,
+        CHANNELS * SAMPLE_WIDTH, SAMPLE_WIDTH * 8,
+        b'data', data_size,
+    )
+    return header + pcm_data
+
+
+def _clean_script_for_gemini(script: str) -> str:
+    """
+    Clean script for Gemini multi-speaker TTS.
+    KEEP speaker labels (AEODE/CHARON/KORE/ZEPHYR) — Gemini uses them to assign voices.
+    Remove markers only.
+    """
     clean = re.sub(r'\[ANCHOR:\s*"[^"]+"\]', '', script)
     clean = re.sub(r'\[IMAGE_PROMPT:\s*"[^"]+"\]', '', clean)
-    clean = re.sub(r'\[PAUSE\]', '', clean)
-    clean = re.sub(r'^(TEACHER|STUDENT_CHLOE|STUDENT_NATE|STUDENT_MIA):\s*', '', clean, flags=re.MULTILINE)
+    clean = re.sub(r'\[PAUSE\]', '...', clean)  # natural pause
     clean = re.sub(r'\n{3,}', '\n\n', clean)
     return clean.strip()
 
 
-def _chunk_text(text: str, max_chars: int = 2000) -> list[str]:
-    """Split text at paragraph boundaries into chunks under max_chars."""
-    paragraphs = text.split("\n\n")
+def _chunk_by_speaker(text: str, max_chars: int = 4000) -> list[str]:
+    """
+    Split text at speaker-line boundaries into chunks under max_chars.
+    Never breaks a speaker turn across chunks.
+    """
+    # Split into speaker turns — each starts with LABEL:
+    speaker_pattern = re.compile(r'^(AEODE|CHARON|KORE|ZEPHYR):', re.MULTILINE)
+    starts = [m.start() for m in speaker_pattern.finditer(text)]
+
+    if not starts:
+        # No speaker labels found — fall back to paragraph chunking
+        paragraphs = text.split("\n\n")
+        chunks = []
+        current = ""
+        for para in paragraphs:
+            if len(current) + len(para) + 2 > max_chars and current:
+                chunks.append(current.strip())
+                current = ""
+            current += para + "\n\n"
+        if current.strip():
+            chunks.append(current.strip())
+        return chunks
+
+    # Build turn list: each turn is text from its start to the next speaker's start
+    turns = []
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        turns.append(text[start:end].strip())
+
+    # Pack turns into chunks respecting max_chars
     chunks = []
     current = ""
-    for para in paragraphs:
-        if len(current) + len(para) + 2 > max_chars and current:
+    for turn in turns:
+        if len(current) + len(turn) + 2 > max_chars and current:
             chunks.append(current.strip())
             current = ""
-        current += para + "\n\n"
+        current += turn + "\n\n"
     if current.strip():
         chunks.append(current.strip())
     return chunks
 
 
+async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient) -> bytes:
+    """
+    Call Gemini multi-speaker TTS with 4 voices. Returns raw PCM bytes.
+    """
+    prompt = f"TTS the following classroom dialogue:\n\n{chunk_text}"
+
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "multiSpeakerVoiceConfig": {
+                    "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
+                }
+            },
+            "temperature": 2.0,
+        },
+    }
+
+    url = f"{GEMINI_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}"
+    response = await tts_client.post(url, json=payload)
+
+    if response.status_code != 200:
+        logger.error(f"Gemini TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
+        raise Exception(f"Gemini TTS failed: HTTP {response.status_code} — {response.text[:200]}")
+
+    data = response.json()
+    try:
+        audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
+    except (KeyError, IndexError) as e:
+        raise Exception(f"Gemini TTS response malformed: {e} — body: {str(data)[:300]}")
+
+    return base64.b64decode(audio_b64)
+
+
 async def _tts_chunks(topic_id: str, label: str, chunks: list[str]) -> tuple:
     """
-    TTS a list of text chunks with retry. Returns (audio_parts, timestamps, total_duration).
-    audio_parts: list of bytes (MP3 segments)
-    timestamps: list of word timestamp dicts
-    total_duration: float seconds
+    TTS a list of chunks via Gemini multi-speaker, with retry + rate limiting.
+    Returns (combined_pcm_bytes, total_duration_seconds).
     """
-    all_audio_parts = []
-    all_timestamps = []
-    cumulative_time = 0.0
+    all_pcm_parts = []
 
-    for i, chunk in enumerate(chunks):
-        if i > 0:
-            await asyncio.sleep(1)
-        logger.info(f"Lecture audio [{topic_id}] — {label} TTS chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+    async with httpx.AsyncClient(timeout=300.0) as tts_client:
+        for i, chunk in enumerate(chunks):
+            if i > 0:
+                await asyncio.sleep(2)  # rate limit spacing
+            logger.info(f"Lecture audio [{topic_id}] — {label} TTS chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
 
-        max_retries = 2
-        for attempt in range(max_retries + 1):
-            try:
-                result = await inworld_tts(chunk, voice_id="Kelsey", get_timestamps=True)
-                break
-            except Exception as e:
-                if attempt < max_retries:
-                    logger.warning(f"Lecture audio [{topic_id}] — {label} chunk {i+1} failed (attempt {attempt+1}), retrying: {e}")
-                    await asyncio.sleep(2)
-                else:
-                    raise
-
-        if not result or not result.get("audio"):
-            logger.error(f"Lecture audio [{topic_id}] — {label} chunk {i+1} no audio")
-            continue
-
-        all_audio_parts.append(base64.b64decode(result["audio"]))
-
-        if result.get("timestamps"):
-            words = result["timestamps"].get("words", [])
-            starts = result["timestamps"].get("wordStartTimeSeconds", [])
-            ends = result["timestamps"].get("wordEndTimeSeconds", [])
-            for j in range(min(len(words), len(starts), len(ends))):
-                all_timestamps.append({
-                    "word": words[j],
-                    "start": starts[j] + cumulative_time,
-                    "end": ends[j] + cumulative_time,
-                })
-            if ends:
-                cumulative_time = ends[-1] + cumulative_time + 0.1
-
-    return all_audio_parts, all_timestamps, cumulative_time
-
-
-def _match_anchors_to_timestamps(anchors: list[dict], all_timestamps: list[dict], cumulative_time: float) -> list[dict]:
-    """Match anchor text to word timestamps. Falls back to char-position estimation."""
-    anchor_timings = []
-    for anchor in anchors:
-        anchor_words = anchor["text"].lower().split()
-        if not anchor_words:
-            continue
-        matched = False
-        for i, ts in enumerate(all_timestamps):
-            if ts["word"].lower().strip(".,!?;:\"'") == anchor_words[0].strip(".,!?;:\"'"):
-                match = True
-                for k, aw in enumerate(anchor_words[1:], 1):
-                    if i + k >= len(all_timestamps):
-                        match = False
-                        break
-                    if all_timestamps[i + k]["word"].lower().strip(".,!?;:\"'") != aw.strip(".,!?;:\"'"):
-                        match = False
-                        break
-                if match:
-                    end_idx = min(i + len(anchor_words) - 1, len(all_timestamps) - 1)
-                    anchor_timings.append({
-                        "text": anchor["text"],
-                        "start_time": ts["start"],
-                        "end_time": all_timestamps[end_idx]["end"],
-                    })
-                    matched = True
+            max_retries = 2
+            pcm = None
+            for attempt in range(max_retries + 1):
+                try:
+                    pcm = await _gemini_multi_speaker_tts(chunk, tts_client)
                     break
-        if not matched:
-            total_chars = sum(len(ts["word"]) + 1 for ts in all_timestamps)
-            if total_chars > 0 and all_timestamps:
-                ratio = anchor["char_position"] / max(total_chars, 1)
-                est_time = ratio * all_timestamps[-1]["end"]
-                anchor_timings.append({
-                    "text": anchor["text"],
-                    "start_time": est_time,
-                    "end_time": est_time + 3.0,
-                    "estimated": True,
-                })
+                except Exception as e:
+                    if attempt < max_retries:
+                        logger.warning(f"Lecture audio [{topic_id}] — {label} chunk {i+1} failed (attempt {attempt+1}), retrying: {e}")
+                        await asyncio.sleep(3)
+                    else:
+                        raise
+
+            if not pcm:
+                logger.error(f"Lecture audio [{topic_id}] — {label} chunk {i+1} no audio")
+                continue
+
+            all_pcm_parts.append(pcm)
+
+    combined_pcm = b"".join(all_pcm_parts)
+    # Duration from PCM size: bytes / (sample_rate * sample_width * channels)
+    duration = len(combined_pcm) / (SAMPLE_RATE * SAMPLE_WIDTH * CHANNELS)
+    return combined_pcm, duration
+
+
+def _estimate_anchor_timings(anchors: list[dict], total_duration: float, script_length: int) -> list[dict]:
+    """
+    Estimate anchor timings from character position in the script.
+    Gemini doesn't return word timestamps, so we use proportional placement.
+    """
+    anchor_timings = []
+    if script_length <= 0 or total_duration <= 0:
+        return anchor_timings
+
+    for anchor in anchors:
+        ratio = anchor["char_position"] / script_length
+        est_time = ratio * total_duration
+        anchor_timings.append({
+            "text": anchor["text"],
+            "start_time": est_time,
+            "end_time": est_time + 3.0,
+            "estimated": True,
+        })
     return anchor_timings
 
 
 async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
     """Generate lecture audio. Uses per-segment if manifest exists, otherwise full-script."""
 
-    # Try to load segment manifest
     manifest = None
     try:
         manifest_bytes = download_from_r2(f"{topic_id}/lecture/manifest.json")
@@ -151,12 +213,11 @@ async def generate_podcast_audio(topic_id: str, supabase_client) -> str:
 
 
 async def _generate_per_segment(topic_id: str, supabase_client, manifest: dict) -> str:
-    """Generate audio for each segment in the lecture manifest."""
+    """Generate audio for each segment in the lecture manifest via Gemini multi-speaker."""
 
     for seg in manifest["segments"]:
         seg_num = seg["number"]
 
-        # Load segment script
         script_bytes = download_from_r2(seg["script_url"])
         script = script_bytes.decode("utf-8")
 
@@ -165,8 +226,7 @@ async def _generate_per_segment(topic_id: str, supabase_client, manifest: dict) 
         for match in re.finditer(r'\[ANCHOR:\s*"([^"]+)"\]', script):
             anchors.append({"text": match.group(1), "char_position": match.start()})
 
-        # Clean for TTS
-        clean_script = _clean_script_for_tts(script)
+        clean_script = _clean_script_for_gemini(script)
 
         if not clean_script:
             logger.warning(f"Lecture audio [{topic_id}] — segment {seg_num} is empty after cleaning, skipping")
@@ -174,33 +234,33 @@ async def _generate_per_segment(topic_id: str, supabase_client, manifest: dict) 
 
         logger.info(f"Lecture audio [{topic_id}] — generating audio for segment {seg_num} ({len(clean_script)} chars)")
 
-        # Chunk and TTS
-        chunks = _chunk_text(clean_script)
-        audio_parts, timestamps, duration = await _tts_chunks(topic_id, f"seg{seg_num}", chunks)
+        chunks = _chunk_by_speaker(clean_script)
+        combined_pcm, duration = await _tts_chunks(topic_id, f"seg{seg_num}", chunks)
 
-        if not audio_parts:
+        if not combined_pcm:
             logger.error(f"Lecture audio [{topic_id}] — no audio generated for segment {seg_num}")
             continue
 
-        combined_audio = b"".join(audio_parts)
+        # Wrap combined PCM in WAV header once
+        wav_data = _pcm_to_wav(combined_pcm)
 
         # Store audio
-        audio_key = f"{topic_id}/lecture/segment_{seg_num}.mp3"
-        upload_bytes_to_r2(audio_key, combined_audio, content_type="audio/mpeg")
+        audio_key = f"{topic_id}/lecture/segment_{seg_num}.wav"
+        upload_bytes_to_r2(audio_key, wav_data, content_type="audio/wav")
         seg["audio_url"] = audio_key
 
-        # Match anchors and store timestamps
-        anchor_timings = _match_anchors_to_timestamps(anchors, timestamps, duration)
+        # Estimate anchor timings from char position
+        anchor_timings = _estimate_anchor_timings(anchors, duration, len(clean_script))
         timestamps_data = {
             "duration": duration,
             "anchors": anchor_timings,
-            "word_count": len(timestamps),
+            "word_count": 0,  # Gemini doesn't provide word timestamps
         }
         ts_key = f"{topic_id}/lecture/segment_{seg_num}_timestamps.json"
         upload_text_to_r2(ts_key, json.dumps(timestamps_data, indent=2))
         seg["timestamps_url"] = ts_key
 
-        logger.info(f"Lecture audio [{topic_id}] — segment {seg_num} complete ({len(combined_audio)} bytes, {duration:.1f}s)")
+        logger.info(f"Lecture audio [{topic_id}] — segment {seg_num} complete ({len(wav_data)} bytes, {duration:.1f}s)")
 
     # Update manifest with audio URLs
     manifest_key = f"{topic_id}/lecture/manifest.json"
@@ -226,35 +286,31 @@ async def _generate_full_script(topic_id: str, supabase_client) -> str:
     script = script_bytes.decode("utf-8")
     logger.info(f"Lecture audio [{topic_id}] — loaded full script ({len(script)} chars)")
 
-    # Extract anchors
     anchors = []
     for match in re.finditer(r'\[ANCHOR:\s*"([^"]+)"\]', script):
         anchors.append({"text": match.group(1), "char_position": match.start()})
 
-    # Clean and chunk
-    clean_script = _clean_script_for_tts(script)
-    chunks = _chunk_text(clean_script)
+    clean_script = _clean_script_for_gemini(script)
+    chunks = _chunk_by_speaker(clean_script)
 
     logger.info(f"Lecture audio [{topic_id}] — {len(chunks)} chunks, {len(anchors)} anchors")
 
-    audio_parts, timestamps, duration = await _tts_chunks(topic_id, "full", chunks)
+    combined_pcm, duration = await _tts_chunks(topic_id, "full", chunks)
 
-    if not audio_parts:
+    if not combined_pcm:
         raise Exception("No audio generated")
 
-    combined_audio = b"".join(audio_parts)
-    anchor_timings = _match_anchors_to_timestamps(anchors, timestamps, duration)
+    wav_data = _pcm_to_wav(combined_pcm)
+    anchor_timings = _estimate_anchor_timings(anchors, duration, len(clean_script))
 
-    # Upload audio
-    audio_key = f"{topic_id}/podcast_audio.mp3"
-    upload_bytes_to_r2(audio_key, combined_audio, content_type="audio/mpeg")
+    audio_key = f"{topic_id}/podcast_audio.wav"
+    upload_bytes_to_r2(audio_key, wav_data, content_type="audio/wav")
 
-    # Upload timestamps
     timestamp_key = f"{topic_id}/lecture_timestamps.json"
     upload_text_to_r2(timestamp_key, json.dumps({
         "total_duration": duration,
         "anchors": anchor_timings,
-        "word_count": len(timestamps),
+        "word_count": 0,
     }, indent=2))
 
     supabase_client.table("topics").update({

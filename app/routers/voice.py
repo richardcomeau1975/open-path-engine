@@ -427,7 +427,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                                 },
                                 json={
                                     "text": sentence.strip(),
-                                    "voice_id": "Kelsey",
+                                    "voice_id": "Ashley",
                                     "model_id": "inworld-tts-1.5-max",
                                     "audio_config": {
                                         "audio_encoding": "MP3",
@@ -465,7 +465,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                         },
                         json={
                             "text": sentence_buffer.strip(),
-                            "voice_id": "Kelsey",
+                            "voice_id": "Ashley",
                             "model_id": "inworld-tts-1.5-max",
                             "audio_config": {
                                 "audio_encoding": "MP3",
