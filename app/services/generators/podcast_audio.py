@@ -1,8 +1,9 @@
 """
 Lecture audio generator.
-Uses Gemini multi-speaker TTS via the AI Studio generativelanguage endpoint (2 voices):
+Uses Google Cloud Text-to-Speech with Gemini multi-speaker model (2 voices):
   EXPERT (Aoede voice), HOST (Charon voice).
-Speaker labels in the script are PRESERVED so Gemini can route each line.
+Auth: service account Bearer token (Cloud TTS with Gemini models routes through
+Vertex AI and requires OAuth, not an API key). Bills to the Google Cloud credit.
 Returns LINEAR16 PCM, wrapped in WAV header. Stores WAV + timestamp JSON on R2.
 """
 
@@ -13,21 +14,50 @@ import re
 import struct
 import logging
 import httpx
+import google.auth.transport.requests
+from google.oauth2 import service_account
 from app.config import settings
 from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2
 
 logger = logging.getLogger(__name__)
 
-GEMINI_TTS_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent"
+CLOUD_TTS_URL = "https://texttospeech.googleapis.com/v1/text:synthesize"
 SAMPLE_RATE = 24000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
-# Gemini multi-speaker voice mapping (hard limit: 2 speakers)
+# Cloud TTS multi-speaker voice mapping (hard limit: 2 speakers)
 SPEAKER_VOICE_CONFIGS = [
-    {"speaker": "EXPERT", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Aoede"}}},
-    {"speaker": "HOST", "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Charon"}}},
+    {"speakerAlias": "EXPERT", "speakerId": "Aoede"},
+    {"speakerAlias": "HOST", "speakerId": "Charon"},
 ]
+
+
+# Cached service account credentials (module-level; refresh-on-demand)
+_credentials = None
+
+
+async def _get_access_token() -> str:
+    """
+    Return a valid OAuth access token for the Cloud TTS service account.
+    Credentials are cached; refreshed only when expired.
+    The refresh call is blocking so we run it in a worker thread.
+    """
+    global _credentials
+    if _credentials is None:
+        if not settings.GOOGLE_SERVICE_ACCOUNT_JSON:
+            raise Exception("GOOGLE_SERVICE_ACCOUNT_JSON not configured")
+        creds_info = json.loads(settings.GOOGLE_SERVICE_ACCOUNT_JSON)
+        _credentials = service_account.Credentials.from_service_account_info(
+            creds_info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+    if not _credentials.valid:
+        await asyncio.to_thread(
+            _credentials.refresh,
+            google.auth.transport.requests.Request(),
+        )
+    return _credentials.token
 
 
 def _pcm_to_wav(pcm_data: bytes) -> bytes:
@@ -150,40 +180,47 @@ def _parse_speaker_turns(script_text: str) -> list[dict]:
 
 async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient) -> bytes:
     """
-    Call Gemini multi-speaker TTS (AI Studio endpoint). Returns raw PCM bytes.
-    Sanity-check speaker labels first (skip if none) so we don't waste a request.
+    Call Google Cloud Text-to-Speech with Gemini multi-speaker. Returns raw PCM bytes.
+    Auth: service account Bearer token (Cloud TTS + Gemini requires OAuth, not an API key).
     """
-    if not _parse_speaker_turns(chunk_text):
+    turns = _parse_speaker_turns(chunk_text)
+    if not turns:
         logger.warning(f"No speaker turns in chunk, skipping. First 200 chars: {chunk_text[:200]}")
         return b""  # Return empty audio — caller will skip
 
-    prompt = f"TTS the following dialogue between EXPERT and HOST:\n\n{chunk_text}"
+    token = await _get_access_token()
 
     payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "responseModalities": ["AUDIO"],
-            "speechConfig": {
-                "multiSpeakerVoiceConfig": {
-                    "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
-                }
+        "input": {
+            "prompt": "Read the following dialogue naturally, matching each speaker's personality.",
+            "multiSpeakerMarkup": {
+                "turns": turns,
             },
-            "temperature": 2.0,
+        },
+        "voice": {
+            "languageCode": "en-us",
+            "modelName": "gemini-2.5-flash-preview-tts",
+            "multiSpeakerVoiceConfig": {
+                "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
+            },
+        },
+        "audioConfig": {
+            "audioEncoding": "LINEAR16",
+            "sampleRateHertz": SAMPLE_RATE,
         },
     }
 
-    url = f"{GEMINI_TTS_URL}?key={settings.GOOGLE_CLOUD_API_KEY}"
-    response = await tts_client.post(url, json=payload)
+    headers = {"Authorization": f"Bearer {token}"}
+    response = await tts_client.post(CLOUD_TTS_URL, json=payload, headers=headers)
 
     if response.status_code != 200:
-        logger.error(f"Gemini TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
-        raise Exception(f"Gemini TTS failed: HTTP {response.status_code} — {response.text[:200]}")
+        logger.error(f"Cloud TTS error — HTTP {response.status_code} — body: {response.text[:500]}")
+        raise Exception(f"Cloud TTS failed: HTTP {response.status_code} — {response.text[:200]}")
 
     data = response.json()
-    try:
-        audio_b64 = data["candidates"][0]["content"]["parts"][0]["inlineData"]["data"]
-    except (KeyError, IndexError) as e:
-        raise Exception(f"Gemini TTS response malformed: {e} — body: {str(data)[:300]}")
+    audio_b64 = data.get("audioContent")
+    if not audio_b64:
+        raise Exception(f"Cloud TTS response missing audioContent — body: {str(data)[:300]}")
 
     return base64.b64decode(audio_b64)
 

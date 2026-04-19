@@ -16,3 +16,4 @@ pyjwt[crypto]>=2.10.1
 svix==1.60.0
 openai>=1.66.0
 pyyaml>=6.0
+google-auth>=2.0.0
