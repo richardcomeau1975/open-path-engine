@@ -1,7 +1,7 @@
 """
 Lecture audio generator.
 Uses Google Cloud Text-to-Speech with Gemini multi-speaker model (2 voices):
-  EXPERT (Aoede voice), HOST (Charon voice).
+  EXPERT (Kore voice), HOST (Puck voice).
 Auth: service account Bearer token (Cloud TTS with Gemini models routes through
 Vertex AI and requires OAuth, not an API key). Bills to the Google Cloud credit.
 Returns LINEAR16 PCM, wrapped in WAV header. Stores WAV + timestamp JSON on R2.
@@ -28,8 +28,8 @@ SAMPLE_WIDTH = 2  # 16-bit PCM
 
 # Cloud TTS multi-speaker voice mapping (hard limit: 2 speakers)
 SPEAKER_VOICE_CONFIGS = [
-    {"speakerAlias": "EXPERT", "speakerId": "Aoede"},
-    {"speakerAlias": "HOST", "speakerId": "Charon"},
+    {"speakerAlias": "EXPERT", "speakerId": "Kore"},
+    {"speakerAlias": "HOST", "speakerId": "Puck"},
 ]
 
 
