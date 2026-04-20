@@ -10,6 +10,7 @@ import traceback
 from datetime import datetime, timezone
 
 from app.services.batch_api import run_anthropic_batch
+from app.services.r2 import download_from_r2
 from app.services.generators.learning_asset import (
     build_learning_asset_prompt, store_learning_asset_result, MODEL as LA_MODEL, MAX_TOKENS as LA_MAX_TOKENS,
 )
@@ -90,26 +91,41 @@ async def run_pipeline(topic_id: str, supabase_client):
 
         # ── BATCH 1: Learning Asset (Opus) ──────────────────────
         _update_step(supabase_client, job_id, "generate_learning_asset", steps_completed)
-        logger.info(f"Pipeline [{topic_id}] — building learning asset prompt")
 
-        la_prompt = await build_learning_asset_prompt(topic_id, supabase_client, **gen_kwargs)
+        # Check if learning asset already exists (e.g., uploaded out-of-band with no parsed_text_url)
+        topic_check = supabase_client.table("topics").select("parsed_text_url, learning_asset_url").eq("id", topic_id).execute()
+        has_parsed_text = bool(topic_check.data[0].get("parsed_text_url")) if topic_check.data else False
+        existing_la_url = topic_check.data[0].get("learning_asset_url") if topic_check.data else None
 
-        logger.info(f"Pipeline [{topic_id}] — submitting learning asset to Batch API")
-        la_results = await run_anthropic_batch([{
-            "custom_id": "learning_asset",
-            "model": LA_MODEL,
-            "max_tokens": LA_MAX_TOKENS,
-            "prompt": la_prompt,
-        }])
+        if has_parsed_text:
+            # Normal path: generate learning asset from parsed text
+            logger.info(f"Pipeline [{topic_id}] — building learning asset prompt")
+            la_prompt = await build_learning_asset_prompt(topic_id, supabase_client, **gen_kwargs)
 
-        la_text = la_results.get("learning_asset")
-        if not la_text:
-            raise Exception("Learning asset batch request failed — cannot continue pipeline")
+            logger.info(f"Pipeline [{topic_id}] — submitting learning asset to Batch API")
+            la_results = await run_anthropic_batch([{
+                "custom_id": "learning_asset",
+                "model": LA_MODEL,
+                "max_tokens": LA_MAX_TOKENS,
+                "prompt": la_prompt,
+            }])
 
-        await store_learning_asset_result(topic_id, supabase_client, la_text)
+            la_text = la_results.get("learning_asset")
+            if not la_text:
+                raise Exception("Learning asset batch request failed — cannot continue pipeline")
+
+            await store_learning_asset_result(topic_id, supabase_client, la_text)
+            logger.info(f"Pipeline [{topic_id}] — learning asset complete ({len(la_text)} chars)")
+        elif existing_la_url:
+            # Skip path: learning asset already exists, load it for downstream use
+            logger.info(f"Pipeline [{topic_id}] — parsed_text_url is None but learning_asset_url exists, skipping generation")
+            la_text = download_from_r2(existing_la_url).decode("utf-8")
+            logger.info(f"Pipeline [{topic_id}] — loaded existing learning asset ({len(la_text)} chars)")
+        else:
+            raise Exception("No parsed text and no existing learning asset — cannot continue pipeline")
+
         steps_completed.append("generate_learning_asset")
         _update_step(supabase_client, job_id, "generate_learning_asset", steps_completed)
-        logger.info(f"Pipeline [{topic_id}] — learning asset complete ({len(la_text)} chars)")
 
         # ── BATCH 2: Podcast + Notechart + Visual Overview (Sonnet) ─
         _update_step(supabase_client, job_id, "generate_podcast_script", steps_completed)

@@ -21,7 +21,7 @@ async def generate_topic(topic_id: str, request: Request, student: dict = Depend
     supabase = get_supabase()
 
     # Verify topic exists and belongs to this student
-    topic_result = supabase.table("topics").select("id, parsed_text_url, generation_status, courses(student_id)").eq("id", topic_id).execute()
+    topic_result = supabase.table("topics").select("id, parsed_text_url, learning_asset_url, generation_status, courses(student_id)").eq("id", topic_id).execute()
     if not topic_result.data:
         raise HTTPException(status_code=404, detail="Topic not found")
 
@@ -29,8 +29,8 @@ async def generate_topic(topic_id: str, request: Request, student: dict = Depend
     if topic.get("courses", {}).get("student_id") != student["id"]:
         raise HTTPException(status_code=403, detail="Not your topic")
 
-    # Must have parsed text
-    if not topic.get("parsed_text_url"):
+    # Must have either parsed text (for full pipeline) or an existing learning asset (for downstream-only)
+    if not topic.get("parsed_text_url") and not topic.get("learning_asset_url"):
         raise HTTPException(status_code=400, detail="No parsed text found — upload files first")
 
     # Don't start if already generating

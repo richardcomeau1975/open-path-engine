@@ -530,13 +530,13 @@ async def rerun_generation(topic_id: str):
     sb = get_supabase()
 
     # Verify topic exists
-    topic_result = sb.table("topics").select("id, parsed_text_url").eq("id", topic_id).execute()
+    topic_result = sb.table("topics").select("id, parsed_text_url, learning_asset_url").eq("id", topic_id).execute()
     if not topic_result.data:
         raise HTTPException(status_code=404, detail="Topic not found")
 
     topic = topic_result.data[0]
-    if not topic.get("parsed_text_url"):
-        raise HTTPException(status_code=400, detail="No parsed text found — upload files first")
+    if not topic.get("parsed_text_url") and not topic.get("learning_asset_url"):
+        raise HTTPException(status_code=400, detail="No parsed text or learning asset found — upload files first")
 
     # Reset topic status and all output URLs
     sb.table("topics").update({
