@@ -7,10 +7,8 @@ generate individual outputs (with real or test prompts), and trigger downstream 
 import asyncio
 import uuid
 import logging
-from typing import Optional
-
 import anthropic
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from pydantic import BaseModel
 
 from app.middleware.clerk_auth import get_current_student

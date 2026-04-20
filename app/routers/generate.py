@@ -3,14 +3,12 @@ Generation endpoint — kicks off the pipeline for a topic.
 """
 
 import asyncio
-import logging
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.middleware.clerk_auth import get_current_student
 from app.services.pipeline import run_pipeline
 from app.services.supabase import get_supabase
 
-logger = logging.getLogger(__name__)
 router = APIRouter()
 
 

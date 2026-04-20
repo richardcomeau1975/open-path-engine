@@ -21,7 +21,6 @@ from app.services.generators.visual_overview import (
 )
 from app.services.generators.podcast_audio import generate_podcast_audio as gen_podcast_audio
 from app.services.generators.narration_audio import generate_narration_audio as gen_narration_audio
-from app.services.r2 import download_from_r2
 
 logger = logging.getLogger(__name__)
 
