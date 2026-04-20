@@ -547,11 +547,13 @@ async def generate_admin_output(
                     await generate_podcast_audio(topic_id, bg_sb)
                     logger.info(f"admin generate [{topic_id}] — podcast_audio auto-chain completed")
 
-                    # Step 3: Generate images per segment
-                    logger.info(f"admin generate [{topic_id}] — auto-chaining to lecture images")
-                    from app.services.generators.images import generate_lecture_images
-                    await generate_lecture_images(topic_id, bg_sb)
-                    logger.info(f"admin generate [{topic_id}] — lecture images auto-chain completed")
+                    # Image generation disabled — lectures use GSAP text anchoring instead
+                    # # Step 3: Generate images per segment
+                    # logger.info(f"admin generate [{topic_id}] — auto-chaining to lecture images")
+                    # from app.services.generators.images import generate_lecture_images
+                    # await generate_lecture_images(topic_id, bg_sb)
+                    # logger.info(f"admin generate [{topic_id}] — lecture images auto-chain completed")
+                    logger.info(f"generate-from [{topic_id}] — lecture_images skipped (GSAP text anchoring)")
 
                 except Exception as e:
                     logger.error(f"admin generate [{topic_id}] — auto-chain failed: {e}")
@@ -858,14 +860,16 @@ async def generate_downstream(
                     _update_step_status(topic_id, "podcast_audio", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
 
-                # After lecture audio, generate per-segment lecture images
-                # (reads image_prompts from the lecture manifest, not the visual_overview script)
-                try:
-                    from app.services.generators.images import generate_lecture_images
-                    await generate_lecture_images(topic_id, bg_sb)
-                    logger.info(f"generate-from [{topic_id}] — lecture_images completed")
-                except Exception as e:
-                    logger.error(f"generate-from [{topic_id}] — lecture_images failed (continuing): {e}")
+                # Image generation disabled — lectures use GSAP text anchoring instead
+                # # After lecture audio, generate per-segment lecture images
+                # # (reads image_prompts from the lecture manifest, not the visual_overview script)
+                # try:
+                #     from app.services.generators.images import generate_lecture_images
+                #     await generate_lecture_images(topic_id, bg_sb)
+                #     logger.info(f"generate-from [{topic_id}] — lecture_images completed")
+                # except Exception as e:
+                #     logger.error(f"generate-from [{topic_id}] — lecture_images failed (continuing): {e}")
+                logger.info(f"generate-from [{topic_id}] — lecture_images skipped (GSAP text anchoring)")
 
             if "narration_audio" in media_steps:
                 if "podcast_audio" in media_steps:
