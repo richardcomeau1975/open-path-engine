@@ -827,6 +827,17 @@ async def generate_downstream(
                 _update_step_status(topic_id, step, "failed", str(e))
                 logger.error(f"generate-from [{topic_id}] — {step} failed: {e}")
 
+        # If podcast_script was just produced, split it into segments BEFORE
+        # podcast_audio runs, so the audio generator produces per-segment .wav
+        # files (manifest-driven) instead of a monolithic fallback.
+        if "podcast_script" in text_steps:
+            try:
+                from app.services.generators.lecture_segments import split_and_store_segments
+                manifest = await split_and_store_segments(topic_id, bg_sb)
+                logger.info(f"generate-from [{topic_id}] — split into {manifest['segment_count']} lecture segments")
+            except Exception as e:
+                logger.error(f"generate-from [{topic_id}] — segment split failed (continuing): {e}")
+
         # ── MEDIA STEPS ─────────────────────────────────────────
         if media_steps:
             if "visual_overview_images" in media_steps:
@@ -848,6 +859,15 @@ async def generate_downstream(
                 except Exception as e:
                     _update_step_status(topic_id, "podcast_audio", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
+
+                # After lecture audio, generate per-segment lecture images
+                # (reads image_prompts from the lecture manifest, not the visual_overview script)
+                try:
+                    from app.services.generators.images import generate_lecture_images
+                    await generate_lecture_images(topic_id, bg_sb)
+                    logger.info(f"generate-from [{topic_id}] — lecture_images completed")
+                except Exception as e:
+                    logger.error(f"generate-from [{topic_id}] — lecture_images failed (continuing): {e}")
 
             if "narration_audio" in media_steps:
                 if "podcast_audio" in media_steps:
