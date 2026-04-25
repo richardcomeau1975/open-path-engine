@@ -582,3 +582,133 @@ async def get_activity():
             "topics": topic_count.count or 0,
         },
     }
+
+
+@router.get("/usage", dependencies=[Depends(require_admin)])
+async def get_usage_dashboard():
+    """Aggregated usage data for the admin dashboard."""
+    sb = get_supabase()
+
+    # Counts
+    students = sb.table("students").select("id", count="exact").is_("archived_at", "null").execute()
+    courses = sb.table("courses").select("id", count="exact").eq("active", True).execute()
+
+    # Walkthrough sessions — last 30 days
+    from datetime import datetime, timedelta, timezone
+    thirty_days_ago = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+
+    sessions = sb.table("walkthrough_sessions").select(
+        "id, topic_id, student_id, mode, created_at, messages"
+    ).gte("created_at", thirty_days_ago).order("created_at", desc=True).limit(200).execute()
+
+    # Exit ticket results — all time
+    exit_tickets = sb.table("exit_ticket_results").select(
+        "id, topic_id, segment_number, student_id, status, created_at"
+    ).order("created_at", desc=True).limit(200).execute()
+
+    # Student names for display
+    student_list = sb.table("students").select("id, name, email").is_("archived_at", "null").execute()
+    student_map = {s["id"]: s for s in student_list.data}
+
+    # Compute stats
+    total_sessions = len(sessions.data)
+    total_et = len(exit_tickets.data)
+    et_pass = len([e for e in exit_tickets.data if e["status"] == "pass"])
+
+    # Per-student activity
+    student_activity = {}
+    for s in sessions.data:
+        sid = s["student_id"]
+        if sid not in student_activity:
+            student_activity[sid] = {"sessions": 0, "last_active": s["created_at"]}
+        student_activity[sid]["sessions"] += 1
+
+    for e in exit_tickets.data:
+        sid = e["student_id"]
+        if sid not in student_activity:
+            student_activity[sid] = {"sessions": 0, "last_active": e["created_at"]}
+
+    activity_list = []
+    for sid, data in student_activity.items():
+        info = student_map.get(sid, {})
+        activity_list.append({
+            "student_id": sid,
+            "name": info.get("name", "Unknown"),
+            "email": info.get("email", ""),
+            "sessions": data["sessions"],
+            "last_active": data["last_active"],
+        })
+    activity_list.sort(key=lambda x: x["last_active"], reverse=True)
+
+    return {
+        "stats": {
+            "active_students": len(student_activity),
+            "total_students": students.count or 0,
+            "total_courses": courses.count or 0,
+            "total_sessions": total_sessions,
+            "total_exit_tickets": total_et,
+            "exit_ticket_pass_rate": round(et_pass / total_et * 100) if total_et > 0 else 0,
+        },
+        "student_activity": activity_list,
+    }
+
+
+@router.get("/students/{student_id}/usage", dependencies=[Depends(require_admin)])
+async def get_student_usage(student_id: str):
+    """Per-student usage — sessions and exit tickets across all their courses."""
+    sb = get_supabase()
+
+    # Get student's courses
+    courses = sb.table("courses").select("id, name").eq("student_id", student_id).eq("active", True).execute()
+    course_ids = [c["id"] for c in courses.data]
+
+    # Get topics for those courses
+    all_topics = []
+    for cid in course_ids:
+        topics = sb.table("topics").select("id, name, course_id").eq("course_id", cid).execute()
+        all_topics.extend(topics.data)
+    topic_ids = [t["id"] for t in all_topics]
+
+    # Walkthrough sessions for those topics
+    sessions = []
+    for tid in topic_ids:
+        result = sb.table("walkthrough_sessions").select(
+            "id, topic_id, mode, created_at, messages"
+        ).eq("topic_id", tid).eq("student_id", student_id).order("created_at", desc=True).limit(50).execute()
+        sessions.extend(result.data)
+
+    # Exit tickets for those topics
+    exit_tickets = []
+    for tid in topic_ids:
+        result = sb.table("exit_ticket_results").select(
+            "id, topic_id, segment_number, status, evaluation, created_at"
+        ).eq("topic_id", tid).eq("student_id", student_id).order("created_at", desc=True).limit(50).execute()
+        exit_tickets.extend(result.data)
+
+    # Build topic name map
+    topic_map = {t["id"]: t["name"] for t in all_topics}
+
+    # Merge into timeline
+    timeline = []
+    for s in sessions:
+        msg_count = len(s.get("messages") or [])
+        timeline.append({
+            "type": "session",
+            "topic": topic_map.get(s["topic_id"], "Unknown"),
+            "mode": s.get("mode", ""),
+            "messages": msg_count,
+            "created_at": s["created_at"],
+        })
+    for e in exit_tickets:
+        timeline.append({
+            "type": "exit_ticket",
+            "topic": topic_map.get(e["topic_id"], "Unknown"),
+            "segment": e["segment_number"],
+            "status": e["status"],
+            "evaluation": e.get("evaluation"),
+            "created_at": e["created_at"],
+        })
+
+    timeline.sort(key=lambda x: x["created_at"], reverse=True)
+
+    return {"timeline": timeline}
