@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import anthropic
 import json
+import re
 from datetime import datetime
 
 from app.middleware.clerk_auth import get_current_student
@@ -11,6 +12,63 @@ from app.services.modifier_assembly import gather_modifiers
 from app.services.r2 import download_from_r2
 
 router = APIRouter(prefix="/api/walkthrough", tags=["walkthrough"])
+
+
+def _extract_segment_from_asset(full_asset: str, segment_number: int) -> str | None:
+    """Extract a single segment's content from the full learning asset markdown.
+
+    Looks for segment headers like:
+    - ## Segment 1, ## Segment 2
+    - ## SEGMENT 1, ## SEGMENT 2
+    - **Segment 1**, **Segment 2**
+    - Cluster 1, Cluster 2
+
+    Returns the content between this segment's header and the next, or None if
+    the structure can't be parsed.
+    """
+    # Try several header patterns
+    patterns = [
+        rf'(?m)^##\s*(?:Segment|SEGMENT)\s*{segment_number}\b',
+        rf'(?m)^\*\*(?:Segment|SEGMENT)\s*{segment_number}\b',
+        rf'(?m)^##\s*(?:Cluster|CLUSTER)\s*{segment_number}\b',
+        rf'(?m)^---\s*\n##\s*{segment_number}\b',
+    ]
+
+    start_match = None
+    for pattern in patterns:
+        m = re.search(pattern, full_asset)
+        if m:
+            start_match = m
+            break
+
+    if not start_match:
+        return None
+
+    start_pos = start_match.start()
+
+    # Find the next segment header
+    next_number = segment_number + 1
+    next_patterns = [
+        rf'(?m)^##\s*(?:Segment|SEGMENT)\s*{next_number}\b',
+        rf'(?m)^\*\*(?:Segment|SEGMENT)\s*{next_number}\b',
+        rf'(?m)^##\s*(?:Cluster|CLUSTER)\s*{next_number}\b',
+        rf'(?m)^---\s*\n##\s*{next_number}\b',
+    ]
+
+    end_pos = len(full_asset)
+    for pattern in next_patterns:
+        m = re.search(pattern, full_asset[start_pos + 1:])
+        if m:
+            end_pos = start_pos + 1 + m.start()
+            break
+
+    extracted = full_asset[start_pos:end_pos].strip()
+
+    # Sanity check — extracted content should be meaningful (> 200 chars)
+    if len(extracted) < 200:
+        return None
+
+    return extracted
 
 
 @router.get("/{topic_id}/sessions")
@@ -166,6 +224,17 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
         try:
             asset_bytes = download_from_r2(learning_asset_url)
             learning_asset = asset_bytes.decode("utf-8")
+            # If we fell back to the full asset for a segment_tutorial, try to
+            # extract just this segment's content to keep token usage low.
+            if (
+                session["mode"] == "segment_tutorial"
+                and learning_asset
+                and len(learning_asset) > 3000
+            ):
+                segment_num = (session.get("metadata") or {}).get("segment_number", 1)
+                extracted = _extract_segment_from_asset(learning_asset, segment_num)
+                if extracted:
+                    learning_asset = extracted
         except:
             pass
 

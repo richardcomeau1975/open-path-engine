@@ -319,3 +319,29 @@ async def get_exit_ticket_status(
         return {"status": "not_started", "result": None}
 
     return {"status": existing.data[0]["status"], "result": existing.data[0]}
+
+
+@router.get("/{topic_id}/status/all")
+async def get_all_exit_ticket_statuses(
+    topic_id: str, request: Request, student: dict = Depends(get_current_student)
+):
+    """Return exit ticket status for every segment the student has attempted."""
+    supabase = get_supabase()
+
+    results = (
+        supabase.table("exit_ticket_results")
+        .select("segment_number, status, created_at")
+        .eq("topic_id", topic_id)
+        .eq("student_id", student["id"])
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    # Deduplicate — keep latest status per segment
+    status_map = {}
+    for r in results.data:
+        seg = r["segment_number"]
+        if seg not in status_map:
+            status_map[seg] = r["status"]
+
+    return {"statuses": status_map}
