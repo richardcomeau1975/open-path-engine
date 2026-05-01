@@ -19,37 +19,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/travel", tags=["travel"])
 
-
-# ── Gemini TTS via Cloud TTS REST (single-voice) ──
-# Reuses the service-account auth + endpoint already proven in podcast_audio.py.
-async def gemini_tts(text: str, voice: str = "Laomedeia") -> str | None:
-    """Generate audio via Cloud TTS Gemini single-voice. Returns base64 MP3 or None."""
-    from app.services.generators.podcast_audio import _get_access_token, CLOUD_TTS_URL
-    try:
-        token = await _get_access_token()
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                CLOUD_TTS_URL,
-                json={
-                    "input": {"text": text},
-                    "voice": {
-                        "languageCode": "en-us",
-                        "modelName": "gemini-2.5-flash-preview-tts",
-                        "name": voice,
-                    },
-                    "audioConfig": {"audioEncoding": "MP3"},
-                },
-                headers={"Authorization": f"Bearer {token}"},
-            )
-            if response.status_code != 200:
-                logger.warning(f"Gemini TTS failed: {response.status_code} {response.text[:200]}")
-                return None
-            return response.json().get("audioContent")
-    except Exception as e:
-        logger.error(f"Gemini TTS exception: {e}")
-        return None
-
-
 # ── YAML card keys on R2 ──
 DESTINATION_CARD_KEYS = [
     "travel/jamaica-destination-card.yaml",
@@ -173,6 +142,7 @@ async def travel_ask_stream(request: Request, student: dict = Depends(get_curren
         full_response = ""
         sentence_buffer = ""
         chunk_index = 0
+        tts_client = httpx.AsyncClient(timeout=30.0)
 
         try:
             async with client.messages.stream(
@@ -197,12 +167,38 @@ async def travel_ask_stream(request: Request, student: dict = Depends(get_curren
 
                         yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
 
-                        # TTS via Gemini (Laomedeia voice)
-                        audio_b64 = await gemini_tts(sentence.strip(), voice="Laomedeia")
-                        if audio_b64:
-                            yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
-                        else:
-                            yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': 'Gemini TTS failed'})}\n\n"
+                        # TTS via Inworld
+                        try:
+                            tts_response = await tts_client.post(
+                                "https://api.inworld.ai/tts/v1/voice",
+                                headers={
+                                    "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "text": sentence.strip(),
+                                    "voice_id": "Dennis",
+                                    "model_id": "inworld-tts-1.5-max",
+                                    "audio_config": {
+                                        "audio_encoding": "MP3",
+                                    },
+                                },
+                            )
+
+                            if tts_response.status_code == 200:
+                                tts_json = tts_response.json()
+                                audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                                if audio_b64:
+                                    yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                                else:
+                                    logger.warning(f"TTS chunk {chunk_index} — no audioContent")
+                            else:
+                                logger.warning(f"TTS chunk {chunk_index} failed: {tts_response.status_code}")
+                                yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': f'HTTP {tts_response.status_code}'})}\n\n"
+
+                        except Exception as e:
+                            logger.error(f"TTS chunk {chunk_index} failed: {e}")
+                            yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': str(e)})}\n\n"
 
                         chunk_index += 1
 
@@ -210,13 +206,36 @@ async def travel_ask_stream(request: Request, student: dict = Depends(get_curren
             if sentence_buffer.strip():
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence_buffer})}\n\n"
 
-                audio_b64 = await gemini_tts(sentence_buffer.strip(), voice="Laomedeia")
-                if audio_b64:
-                    yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                try:
+                    tts_response = await tts_client.post(
+                        "https://api.inworld.ai/tts/v1/voice",
+                        headers={
+                            "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "text": sentence_buffer.strip(),
+                            "voice_id": "Dennis",
+                            "model_id": "inworld-tts-1.5-max",
+                            "audio_config": {
+                                "audio_encoding": "MP3",
+                            },
+                        },
+                    )
+
+                    if tts_response.status_code == 200:
+                        tts_json = tts_response.json()
+                        audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                        if audio_b64:
+                            yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                except Exception as e:
+                    logger.error(f"TTS final chunk failed: {e}")
 
         except Exception as e:
             logger.error(f"Travel streaming failed: {e}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            await tts_client.aclose()
 
         yield f"data: {json.dumps({'type': 'answer', 'text': full_response})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
