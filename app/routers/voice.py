@@ -20,37 +20,6 @@ from app.config import settings
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
 
-async def _elevenlabs_tts_chunk(text: str, voice_id: str = "21m00Tcm4TlvDq8ikWAM") -> str | None:
-    """Generate audio via ElevenLabs streaming TTS. Returns base64 MP3 or None.
-    Default voice: Rachel (warm female). Low latency with eleven_turbo_v2_5.
-    """
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}/stream",
-                headers={
-                    "xi-api-key": settings.ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "model_id": "eleven_turbo_v2_5",
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                    },
-                },
-            )
-            if response.status_code == 200:
-                return base64.b64encode(response.content).decode('utf-8')
-            else:
-                logger.warning(f"ElevenLabs TTS failed: HTTP {response.status_code} {response.text[:200]}")
-                return None
-    except Exception as e:
-        logger.error(f"ElevenLabs TTS failed: {e}")
-        return None
-
-
 @router.post("/transcribe")
 async def transcribe_audio(request: Request, student: dict = Depends(get_current_student)):
     audio_bytes = await request.body()
@@ -396,7 +365,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
         "If the question is about something tangential, connect it back to the material. "
         "NEVER say: learning asset, system, material provided, context, or anything that breaks the illusion. "
         "NEVER refuse to answer. Always give the student something useful. "
-        "Always begin with a very brief natural interruption acknowledgment — like 'Oh — hold on, there's a question...' or 'Yeah, let me pause here.' Then answer directly. "
+        "Don't start with a filler reaction — the student already heard one. Jump straight into the answer. "
         "Answer in 3-4 sentences MAX. Be direct. One clear point per answer. The student will ask follow-ups if they want more — don't try to cover everything at once.\n\n"
         f"LEARNING ASSET:\n\n{learning_asset}\n\n"
     )
@@ -423,6 +392,7 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
         full_response = ""
         sentence_buffer = ""
         chunk_index = 0
+        tts_client = httpx.AsyncClient(timeout=30.0)
 
         try:
             async with client.messages.stream(
@@ -447,13 +417,35 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
 
                         yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
 
-                        # TTS via ElevenLabs (Rachel — low latency)
+                        # TTS via Inworld
                         try:
-                            audio_b64 = await _elevenlabs_tts_chunk(sentence.strip())
-                            if audio_b64:
-                                yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                            tts_response = await tts_client.post(
+                                "https://api.inworld.ai/tts/v1/voice",
+                                headers={
+                                    "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                                    "Content-Type": "application/json",
+                                },
+                                json={
+                                    "text": sentence.strip(),
+                                    "voice_id": "Ashley",
+                                    "model_id": "inworld-tts-1.5-max",
+                                    "audio_config": {
+                                        "audio_encoding": "MP3",
+                                    },
+                                },
+                            )
+
+                            if tts_response.status_code == 200:
+                                tts_json = tts_response.json()
+                                audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                                if audio_b64:
+                                    yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                                else:
+                                    logger.warning(f"TTS chunk {chunk_index} — no audioContent in response")
                             else:
-                                logger.warning(f"TTS chunk {chunk_index} — no audio returned")
+                                logger.warning(f"TTS chunk {chunk_index} failed: {tts_response.status_code} {tts_response.text[:200]}")
+                                yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': f'HTTP {tts_response.status_code}'})}\n\n"
+
                         except Exception as e:
                             logger.error(f"TTS chunk {chunk_index} failed: {e}")
                             yield f"data: {json.dumps({'type': 'tts_error', 'index': chunk_index, 'error': str(e)})}\n\n"
@@ -465,15 +457,35 @@ async def podcast_ask_stream(topic_id: str, request: Request, student: dict = De
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence_buffer})}\n\n"
 
                 try:
-                    audio_b64 = await _elevenlabs_tts_chunk(sentence_buffer.strip())
-                    if audio_b64:
-                        yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                    tts_response = await tts_client.post(
+                        "https://api.inworld.ai/tts/v1/voice",
+                        headers={
+                            "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "text": sentence_buffer.strip(),
+                            "voice_id": "Ashley",
+                            "model_id": "inworld-tts-1.5-max",
+                            "audio_config": {
+                                "audio_encoding": "MP3",
+                            },
+                        },
+                    )
+
+                    if tts_response.status_code == 200:
+                        tts_json = tts_response.json()
+                        audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                        if audio_b64:
+                            yield f"data: {json.dumps({'type': 'audio_chunk', 'index': chunk_index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
                 except Exception as e:
                     logger.error(f"TTS final chunk failed: {e}")
 
         except Exception as e:
             logger.error(f"Streaming Q&A failed: {e}")
             yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            await tts_client.aclose()
 
         # Send full answer for history
         yield f"data: {json.dumps({'type': 'answer', 'text': full_response})}\n\n"

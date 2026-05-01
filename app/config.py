@@ -12,7 +12,6 @@ class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
     INWORLD_API_KEY: str = os.getenv("INWORLD_API_KEY", "")
-    ELEVENLABS_API_KEY: str = os.getenv("ELEVENLABS_API_KEY", "")
 
     # Supabase
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
