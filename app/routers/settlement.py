@@ -16,12 +16,13 @@ import uuid
 
 import anthropic
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from starlette.responses import StreamingResponse
 
 from app.config import settings
 from app.middleware.clerk_auth import get_current_student
 from app.services.settlement_generator import generate_settlement_asset
+from app.services.file_parser import parse_file
 from app.services.r2 import upload_text_to_r2
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,29 @@ async def settlement_generate(request: Request, student: dict = Depends(get_curr
         r2_key = None
 
     return {"asset_id": asset_id, "r2_key": r2_key, "asset": asset}
+
+
+# ── Document parse endpoint ──
+
+@router.post("/parse-document")
+async def settlement_parse_document(
+    file: UploadFile = File(...),
+    student: dict = Depends(get_current_student),
+):
+    """Parse an uploaded document into text for the generator."""
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+    try:
+        text = parse_file(file.filename or "", file_bytes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Document parse failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not parse the document")
+    if not text or not text.strip():
+        raise HTTPException(status_code=422, detail="No text could be extracted from the document")
+    return {"text": text}
 
 
 # ── Conversation prompt (FIRST-DRAFT slot-in — operator refines) ──
