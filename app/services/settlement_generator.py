@@ -2,18 +2,18 @@
 Settlement situation generator.
 
 Takes a situation (a document plus the client's stated need) and produces the
-dot-based intermediate representation: clusters of dots, each dot a navigation
-capability carrying a fluency dimension, joined by a chain, with regulated-advice
-boundaries flagged.
+dot-based card: a reference section of curated factual ground, plus clusters of
+dots, each dot a navigation capability carrying a fluency dimension, joined by a
+chain, with regulated-advice boundaries flagged.
 
 This is the upstream source of truth for the settlement domain. Every downstream
-surface reads the structure this function returns.
+surface reads the card this function returns.
 
-NOTE ON THE PROMPT: SETTLEMENT_GENERATOR_PROMPT below is a FIRST-DRAFT prompt.
-It is refined and tested separately by the operator. The contract the rest of the
+NOTE ON THE PROMPT: SETTLEMENT_GENERATOR_PROMPT below is a FIRST-DRAFT prompt,
+refined and tested separately by the operator. The contract the rest of the
 system depends on is the FUNCTION: generate_settlement_asset(situation_text,
-client_need) returns a dict matching the schema described in the prompt. A refined
-prompt must keep producing that schema.
+client_need) returns a dict matching the schema described in the prompt. A
+refined prompt must keep producing that schema.
 """
 
 import json
@@ -27,9 +27,9 @@ MODEL = "claude-opus-4-6"
 MAX_TOKENS = 16384
 
 
-SETTLEMENT_GENERATOR_PROMPT = """You are the situation generator for a settlement navigation platform. You take a real situation a newcomer to Canada is facing, described to you as a document plus a statement of what the person needs, and you produce the structured representation that every downstream surface of the platform reads from.
+SETTLEMENT_GENERATOR_PROMPT = """You are the situation generator for a settlement navigation platform. You take a real situation a newcomer to Canada is facing, described to you as a document plus a statement of what the person needs, and you produce the structured card that every downstream surface of the platform reads from.
 
-This representation is built from DOTS. A dot is the unit of the whole system. Get the dots right and everything downstream works. Get them wrong and nothing does.
+The card has two parts: a reference section of factual ground, and a set of dots. Get both right and everything downstream works.
 
 WHAT A DOT IS
 
@@ -55,6 +55,14 @@ SHAPED BY THE NEED
 
 The same document produces different dots depending on what the person needs. A CRA letter for someone who only needs to understand it yields a different set of dots than the same letter for someone who has to make the phone call. Read the stated need. Let it decide which capabilities matter and at what depth. Do not generate the encyclopedic set of every possible capability. Generate the set this person needs for what they are facing.
 
+THE REFERENCE
+
+Beyond the dots, the card carries a reference section: the curated factual ground of this situation. This is what is actually true about the process, captured once, so the downstream conversation has the facts in hand and never has to improvise them.
+
+Fill the reference with accurate, specific facts about how this kind of situation actually works. The real process. The documents or evidence that actually count. The real timelines and what happens when they pass. How things are actually submitted or handled. Be concrete. "Send proof of residency" is not a reference fact. "A lease agreement, recent utility bills, or a signed letter from a landlord are commonly accepted as proof that a person lives at an address" is a reference fact.
+
+The reference is facts, not advice. State what is true about the process. Do not state what the person should decide. Keep it curated and compact: the facts that matter for this situation, not an encyclopedia.
+
 THE BOUNDARY, NON-NEGOTIABLE
 
 This platform helps people understand and navigate situations and prepare for interactions. It does NOT give medical, legal, or immigration advice. Immigration advice in Canada is regulated by IRCC and giving it without authorization is an offence.
@@ -70,6 +78,12 @@ Output ONLY valid JSON. No prose before or after. No markdown code fences. Use e
 {
   "situation_summary": "one plain-language sentence naming the situation",
   "domain": "a short lowercase tag for the kind of situation, for example housing, cra, employment",
+  "reference": [
+    {
+      "topic": "short label for this area of factual ground",
+      "facts": ["a specific, accurate factual statement about the real process or rules", "another specific fact"]
+    }
+  ],
   "clusters": [
     {
       "id": "c1",
@@ -112,7 +126,7 @@ def _strip_code_fences(raw: str) -> str:
 
 def generate_settlement_asset(situation_text: str, client_need: str) -> dict:
     """
-    Run the settlement generator. Returns the dot-based representation as a dict.
+    Run the settlement generator. Returns the card as a dict.
     Raises json.JSONDecodeError if the model output is not valid JSON.
     """
     user_content = (
@@ -120,7 +134,7 @@ def generate_settlement_asset(situation_text: str, client_need: str) -> dict:
         f"{situation_text}\n\n"
         "WHAT THE PERSON NEEDS:\n"
         f"{client_need}\n\n"
-        "Produce the structured representation now. Output only the JSON."
+        "Produce the card now. Output only the JSON."
     )
 
     client = anthropic.Anthropic()

@@ -1,9 +1,10 @@
 """
 Settlement domain routes.
 
-Phase 2: the generator endpoint. Produces the dot-based representation.
-Phase 3: the conversation endpoint. Streams a conversation anchored to that
-representation, mirroring the travel ask-stream pipe (Claude stream + Inworld TTS).
+generate: produces the dot-based card.
+converse-stream: a conversation anchored to the card. Each turn streams a spoken
+response to the voice, then emits a compact screen payload (an anchor line and
+optional tappable points) parsed from a delimited tail.
 """
 
 import asyncio
@@ -27,8 +28,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/settlement", tags=["settlement"])
 
+DELIMITER = "###"
 
-# ── Generator endpoint (Phase 2, unchanged) ──
+
+# ── Generator endpoint (unchanged) ──
 
 @router.post("/generate")
 async def settlement_generate(request: Request, student: dict = Depends(get_current_student)):
@@ -64,38 +67,56 @@ async def settlement_generate(request: Request, student: dict = Depends(get_curr
     return {"asset_id": asset_id, "r2_key": r2_key, "asset": asset}
 
 
-# ── Conversation prompt (Phase 3, FIRST-DRAFT slot-in — operator refines) ──
+# ── Conversation prompt (FIRST-DRAFT slot-in — operator refines) ──
 
-SETTLEMENT_CONVERSATION_PROMPT = """You are a settlement navigation assistant. You are helping a newcomer to Canada understand and navigate a specific real situation they are facing. You are speaking with the person themselves.
+SETTLEMENT_CONVERSATION_PROMPT = """You are a settlement navigation assistant. You are helping a newcomer to Canada navigate a specific real situation they are facing. You are speaking with the person themselves.
 
-Below the line you are given the structured representation of their situation: a set of dots. Each dot is a capability the person needs in order to navigate this situation. Each dot carries a fluency dimension, what doing it haltingly looks like and what doing it fluently looks like. The dots are grouped into clusters joined by a chain.
+Below the line is the card for their situation. It has a reference section, the factual ground of the situation, and a set of dots, the capabilities the person needs in order to navigate it, grouped into clusters and joined by a chain. Each dot carries a fluency dimension.
 
-THE DOTS GOVERN THIS CONVERSATION. Do not freelance on the situation. Everything you say should be building one of the capabilities in the dots. When the person asks something, answer in a way that moves them toward the relevant dot. When they are ready, surface the next thing they need from the chain. You are not a general assistant about Canadian bureaucracy. You are walking this specific person through the specific capabilities this situation requires.
+HOW THE CARD GOVERNS YOU
 
-RESPONSE FORMAT, THIS IS SPOKEN AUDIO:
-- Talk like a calm, knowledgeable person sitting next to them. Plain speech.
-- Keep responses short, a few sentences. They are listening, not reading.
-- Never use bold, asterisks, bullets, dashes, lists, or headers.
-- One idea at a time. Do not dump everything at once.
+The card keeps you accurate. The reference section is your source of facts. Use it. Do not improvise the process from memory. The dots tell you which capabilities matter for this situation, so you stay on what is actually relevant.
 
-HOW YOU HELP:
-- Meet the person where they are. If they are confused, slow down and build understanding before moving on.
-- Use the reasoning inside each dot, the why and the how, so the person understands rather than memorizes.
-- Check understanding lightly as you go, the way a person would, not like a quiz.
-- When the situation is ready for it, you can offer to help them practice the interaction.
+The card is not a script. The person leads this conversation, not you. The chain tells you what depends on what, so you understand the situation, but it is not an order you march the person through.
 
-THE BOUNDARY, NON-NEGOTIABLE:
-- You help the person understand, navigate, and prepare. You do not give medical, legal, or immigration advice.
-- The representation includes boundary_flags. When the conversation reaches one of those flagged points, say so plainly and tell the person this is something to take to the right regulated professional, a lawyer, a doctor, or a regulated immigration consultant. Do not give the regulated advice yourself.
+DO NOT SHEPHERD. This is the most important instruction. If the person asks a direct question, answer it directly. Do not preface the answer with something they did not ask for. Do not tell them what you are about to do before you do it. Do not presume how they feel. Do not tell them they are probably worried, or that the letter probably felt like a threat. Respond to what they actually said, the way a sharp, calm person would. If they ask how to prove their eligibility, tell them how to prove their eligibility.
 
-Never say dot, cluster, representation, or anything technical. To the person this is just a conversation about their situation.
+THE SPOKEN RESPONSE
 
-THE SITUATION:
+Your spoken response is voiced aloud. It is plain, warm, conversational speech. Keep it short, a few sentences. One idea at a time. No bold, no asterisks, no bullets, no lists, no headers. Talk like a knowledgeable person sitting next to them.
+
+THE SCREEN
+
+After the spoken response you also produce a compact screen payload. The screen shows almost nothing, just enough to anchor what you said and to give the person things to tap. The voice carries the warmth and the detail. The screen stays minimal.
+
+OUTPUT FORMAT
+
+Produce the spoken response first, as normal prose. Then a new line with the delimiter ###. Then the screen payload, exactly in this form:
+
+ANCHOR: one short line, a handful of words, naming what this turn was about
+POINTS: a short label | another short label | another short label
+
+The POINTS line is optional. Include it only when there are genuine, concrete things the person can choose to go into next, for example the separate items they have to handle. Each point is a few words, tappable, and corresponds to something real in the situation. If there are no natural choices to offer this turn, leave the POINTS line out.
+
+Example of the full shape:
+
+That letter is asking you to prove three separate things, and each one is handled on its own. The first is that your child lives with you, the second is your residency status, and the third is your marital status.
+###
+ANCHOR: Three things to prove
+POINTS: Child lives with you | Residency status | Marital status
+
+THE BOUNDARY, NON-NEGOTIABLE
+
+You help the person understand, navigate, and prepare. You do not give medical, legal, or immigration advice. The card includes boundary_flags. When the conversation reaches one of those flagged points, say so plainly and tell the person it is something to take to the right regulated professional. Do not give the regulated advice yourself.
+
+Never say dot, cluster, card, anchor, or anything technical. To the person this is just a conversation about their situation.
+
+THE CARD:
 
 """
 
 
-# ── Sentence chunking (same as travel ask-stream) ──
+# ── Sentence chunking ──
 
 def _has_tts_chunk(buffer: str) -> bool:
     return bool(re.search(r'[.!?]\s', buffer))
@@ -109,11 +130,28 @@ def _extract_tts_chunk(buffer: str):
     return buffer, ""
 
 
-# ── Conversation endpoint (Phase 3) ──
+# ── Screen tail parsing ──
+
+def _parse_screen_tail(tail: str):
+    """Extract the anchor line and points list from the post-delimiter tail."""
+    anchor = ""
+    points = []
+    for line in tail.split("\n"):
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("ANCHOR:"):
+            anchor = stripped[7:].strip()
+        elif upper.startswith("POINTS:"):
+            raw = stripped[7:].strip()
+            points = [p.strip() for p in raw.split("|") if p.strip()]
+    return anchor, points
+
+
+# ── Conversation endpoint ──
 
 @router.post("/converse-stream")
 async def settlement_converse_stream(request: Request, student: dict = Depends(get_current_student)):
-    """Settlement conversation anchored to a situation's dot representation."""
+    """Settlement conversation anchored to a situation's card."""
     body = await request.json()
     asset = body.get("asset")
     audio_b64_input = body.get("audio")
@@ -159,7 +197,9 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
 
         client = anthropic.AsyncAnthropic()
         full_response = ""
-        sentence_buffer = ""
+        spoken_buffer = ""
+        tail_buffer = ""
+        delimiter_seen = False
         chunk_index = 0
         tts_client = httpx.AsyncClient(timeout=30.0)
 
@@ -201,19 +241,39 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
             ) as stream:
                 async for text in stream.text_stream:
                     full_response += text
-                    sentence_buffer += text
 
-                    while _has_tts_chunk(sentence_buffer):
-                        sentence, sentence_buffer = _extract_tts_chunk(sentence_buffer)
+                    if delimiter_seen:
+                        tail_buffer += text
+                        continue
+
+                    spoken_buffer += text
+
+                    if DELIMITER in spoken_buffer:
+                        before, after = spoken_buffer.split(DELIMITER, 1)
+                        tail_buffer += after
+                        delimiter_seen = True
+                        if before.strip():
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': before.strip()})}\n\n"
+                            yield await _tts(before, chunk_index)
+                            chunk_index += 1
+                        spoken_buffer = ""
+                        continue
+
+                    while _has_tts_chunk(spoken_buffer):
+                        sentence, spoken_buffer = _extract_tts_chunk(spoken_buffer)
                         if not sentence.strip():
                             continue
                         yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
                         yield await _tts(sentence, chunk_index)
                         chunk_index += 1
 
-            if sentence_buffer.strip():
-                yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence_buffer})}\n\n"
-                yield await _tts(sentence_buffer, chunk_index)
+            if not delimiter_seen and spoken_buffer.strip():
+                yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
+                yield await _tts(spoken_buffer, chunk_index)
+                chunk_index += 1
+
+            anchor, points = _parse_screen_tail(tail_buffer)
+            yield f"data: {json.dumps({'type': 'screen', 'anchor': anchor, 'points': points})}\n\n"
 
         except Exception as e:
             logger.error(f"Settlement conversation streaming failed: {e}")
@@ -221,7 +281,8 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
         finally:
             await tts_client.aclose()
 
-        yield f"data: {json.dumps({'type': 'answer', 'text': full_response})}\n\n"
+        spoken_only = full_response.split(DELIMITER, 1)[0].strip()
+        yield f"data: {json.dumps({'type': 'answer', 'text': spoken_only})}\n\n"
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
     return StreamingResponse(
