@@ -314,3 +314,189 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+# ── Framing conversation prompt (FIRST-DRAFT slot-in — operator refines) ──
+
+SETTLEMENT_FRAMING_PROMPT = """You are a settlement navigation assistant. A newcomer to Canada has just described a situation they are facing. You are speaking with the person themselves.
+
+Right now, in the background, a detailed guide to their situation is being prepared. It is not ready yet. Your job during this short window is to keep the person in a real conversation and to learn what matters most to them, so that when the guide is ready you know what to lead with.
+
+WHAT TO DO
+
+Engage immediately and warmly. React to what they told you the way a calm, knowledgeable person would. Then ask the framing questions you genuinely need: what outcome they are hoping for, what they have already tried, which part worries them most, anything that hones in on what this should focus on. One question at a time.
+
+WHAT NOT TO DO
+
+You do not have the guide yet, so you do not have the verified facts of their situation. Do not state the process, the rules, the deadlines, or which documents count. Do not give them the answer. If they ask a direct factual question, tell them plainly that you are pulling the details together right now, and ask them something that helps you frame it while that finishes. Engage and gather. Do not assert facts you cannot yet back.
+
+THE BOUNDARY, NON-NEGOTIABLE
+
+You do not give medical, legal, or immigration advice. If the situation reaches into that territory, say plainly that it is something for the right regulated professional.
+
+THE SPOKEN RESPONSE
+
+Your spoken response is voiced aloud. Plain, warm, conversational speech. Short, a few sentences. One idea at a time. No bold, no asterisks, no bullets, no lists.
+
+OUTPUT FORMAT
+
+Produce the spoken response first, as prose. Then a new line with the delimiter ###. Then:
+
+ANCHOR: one short line naming what this turn was about
+
+Do not produce a POINTS line during this framing stage.
+
+Never say card, guide internals, dot, or anything technical. To the person this is just the start of a conversation about their situation.
+
+THE SITUATION THE PERSON DESCRIBED:
+
+"""
+
+
+# ── Framing conversation endpoint ──
+
+@router.post("/frame-stream")
+async def settlement_frame_stream(request: Request, student: dict = Depends(get_current_student)):
+    """Framing conversation. Runs while the card is generated in parallel. No card yet."""
+    body = await request.json()
+    situation_text = (body.get("situation_text") or "").strip()
+    audio_b64_input = body.get("audio")
+    text_question = body.get("text")
+    history = body.get("history", [])
+
+    if not situation_text:
+        raise HTTPException(status_code=400, detail="situation_text is required")
+
+    question = text_question
+    if audio_b64_input and not question:
+        audio_bytes = base64.b64decode(audio_b64_input)
+        async with httpx.AsyncClient() as client:
+            stt_response = await client.post(
+                "https://api.deepgram.com/v1/listen",
+                params={"model": "nova-3", "smart_format": "true", "language": "en"},
+                headers={
+                    "Authorization": f"Token {settings.DEEPGRAM_API_KEY}",
+                    "Content-Type": "audio/webm",
+                },
+                content=audio_bytes,
+                timeout=30.0,
+            )
+        try:
+            question = stt_response.json()["results"]["channels"][0]["alternatives"][0]["transcript"]
+        except (KeyError, IndexError):
+            raise HTTPException(502, "Transcription failed")
+
+    system_prompt = SETTLEMENT_FRAMING_PROMPT + situation_text
+
+    api_messages = []
+    for msg in history:
+        if msg.get("role") and msg.get("content"):
+            api_messages.append({"role": msg["role"], "content": msg["content"]})
+
+    if question and question.strip():
+        api_messages.append({"role": "user", "content": question})
+    elif not api_messages:
+        api_messages.append({"role": "user", "content": "I have just shared my situation. Please start."})
+    else:
+        api_messages.append({"role": "user", "content": "Please continue."})
+
+    async def generate_stream():
+        if question and question.strip():
+            yield f"data: {json.dumps({'type': 'transcript', 'text': question})}\n\n"
+        yield f"data: {json.dumps({'type': 'thinking'})}\n\n"
+
+        client = anthropic.AsyncAnthropic()
+        full_response = ""
+        spoken_buffer = ""
+        tail_buffer = ""
+        delimiter_seen = False
+        chunk_index = 0
+        tts_client = httpx.AsyncClient(timeout=30.0)
+
+        async def _tts(text_chunk: str, index: int):
+            try:
+                tts_response = await tts_client.post(
+                    "https://api.inworld.ai/tts/v1/voice",
+                    headers={
+                        "Authorization": f"Basic {settings.INWORLD_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "text": text_chunk.strip(),
+                        "voice_id": "Dennis",
+                        "model_id": "inworld-tts-1.5-max",
+                        "audio_config": {"audio_encoding": "MP3"},
+                    },
+                )
+                if tts_response.status_code == 200:
+                    tts_json = tts_response.json()
+                    audio_b64 = tts_json.get("audioContent") or tts_json.get("result", {}).get("audioContent")
+                    if audio_b64:
+                        return f"data: {json.dumps({'type': 'audio_chunk', 'index': index, 'audio': audio_b64, 'format': 'mp3'})}\n\n"
+                return f"data: {json.dumps({'type': 'tts_error', 'index': index, 'error': f'HTTP {tts_response.status_code}'})}\n\n"
+            except Exception as e:
+                logger.error(f"Framing TTS chunk {index} failed: {e}")
+                return f"data: {json.dumps({'type': 'tts_error', 'index': index, 'error': str(e)})}\n\n"
+
+        try:
+            async with client.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=1024,
+                system=[{
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=api_messages,
+            ) as stream:
+                async for text in stream.text_stream:
+                    full_response += text
+
+                    if delimiter_seen:
+                        tail_buffer += text
+                        continue
+
+                    spoken_buffer += text
+
+                    if DELIMITER in spoken_buffer:
+                        before, after = spoken_buffer.split(DELIMITER, 1)
+                        tail_buffer += after
+                        delimiter_seen = True
+                        if before.strip():
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': before.strip()})}\n\n"
+                            yield await _tts(before, chunk_index)
+                            chunk_index += 1
+                        spoken_buffer = ""
+                        continue
+
+                    while _has_tts_chunk(spoken_buffer):
+                        sentence, spoken_buffer = _extract_tts_chunk(spoken_buffer)
+                        if not sentence.strip():
+                            continue
+                        yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
+                        yield await _tts(sentence, chunk_index)
+                        chunk_index += 1
+
+            if not delimiter_seen and spoken_buffer.strip():
+                yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
+                yield await _tts(spoken_buffer, chunk_index)
+                chunk_index += 1
+
+            anchor, points = _parse_screen_tail(tail_buffer)
+            yield f"data: {json.dumps({'type': 'screen', 'anchor': anchor, 'points': points})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Settlement framing streaming failed: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'error': str(e)})}\n\n"
+        finally:
+            await tts_client.aclose()
+
+        spoken_only = full_response.split(DELIMITER, 1)[0].strip()
+        yield f"data: {json.dumps({'type': 'answer', 'text': spoken_only})}\n\n"
+        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
