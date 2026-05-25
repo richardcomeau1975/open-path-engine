@@ -279,7 +279,7 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
     if not question or not question.strip():
         return {"transcript": "", "answer": "", "audio": None}
 
-    system_prompt = MIGRATEEZY_CONVERSATION_PROMPT + json.dumps(asset, indent=2)
+    system_prompt = MIGRATEEZY_CONVERSATION_PROMPT + "\n\n## THE REFERENCE MATERIAL FOR THIS SITUATION\n\n" + json.dumps(asset, indent=2)
 
     api_messages = []
     for msg in history:
@@ -458,7 +458,7 @@ async def settlement_frame_stream(request: Request, student: dict = Depends(get_
         except (KeyError, IndexError):
             raise HTTPException(502, "Transcription failed")
 
-    system_prompt = MIGRATEEZY_CONVERSATION_PROMPT + situation_text
+    system_prompt = MIGRATEEZY_CONVERSATION_PROMPT + "\n\n## THE SITUATION IN FRONT OF THE PERSON\n\n" + situation_text
 
     api_messages = []
     for msg in history:
