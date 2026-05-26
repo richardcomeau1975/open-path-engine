@@ -320,6 +320,7 @@ PROMPT_SOCKETS = [
     {"feature": "notechart", "label": "Active Recall", "description": "Generates framework-shaped recall questions (Sonnet)"},
     {"feature": "exam_analyzer", "label": "Exam Analysis", "description": "Analyzes uploaded sample exams (Sonnet)"},
     {"feature": "quiz_generator", "label": "Quiz Generator", "description": "Generates quiz from learning asset + testing profile (Sonnet)"},
+    {"feature": "migrateezy_conversation", "label": "MigrateEzy Conversation", "description": "Settlement navigation conversation assistant (Sonnet, framing and card-anchored turns)"},
 ]
 
 

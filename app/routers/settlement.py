@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import uuid
+from pathlib import Path
 
 import anthropic
 import httpx
@@ -139,21 +140,42 @@ async def settlement_parse_document(
     return {"text": text}
 
 
-# ── MigrateEzy unified conversation prompt (used by both frame-stream and converse-stream) ──
+# ── MigrateEzy conversation prompt ──
+# Source of truth is app/prompts/migrateezy_conversation.md, which is also seeded
+# into the base_prompts table for editing from the admin UI. This module-level
+# constant is the fallback used when the base_prompts lookup is unavailable.
 
-MIGRATEEZY_CONVERSATION_PROMPT = """
-A person has come to you for help with a situation they are facing in Canada. The material for their situation is provided below.
+_MIGRATEEZY_PROMPT_PATH = (
+    Path(__file__).resolve().parent.parent / "prompts" / "migrateezy_conversation.md"
+)
 
-Your job is to genuinely help them with it. Understand what they actually need, and support them with that, meaningfully, in whatever way the conversation calls for. When something truly needs a lawyer or another professional, say so plainly.
+try:
+    MIGRATEEZY_CONVERSATION_PROMPT = _MIGRATEEZY_PROMPT_PATH.read_text(
+        encoding="utf-8"
+    ).strip()
+except Exception as _e:
+    logger.error(
+        f"Could not load migrateezy_conversation.md ({_e}); "
+        f"using minimal fallback prompt"
+    )
+    MIGRATEEZY_CONVERSATION_PROMPT = (
+        "You help a person handle a situation they are facing in Canada. "
+        "Hold the structure of the situation and carry the work for them. "
+        "Ask them only for what is theirs to give. Be accurate, work from the "
+        "material you are given, and never state a rule you are not sure of."
+    )
 
-Talk with them the way a good interviewer does, someone like Terry Gross: warm, genuinely curious, real. You are a person helping a person.
-"""
 
-
-def _get_conversation_prompt() -> str:
+def _load_conversation_prompt() -> str:
+    """Load the active MigrateEzy conversation prompt from base_prompts.
+    Falls back to MIGRATEEZY_CONVERSATION_PROMPT if no active row is found."""
     try:
         return get_prompt_for_feature("migrateezy_conversation")
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            f"base_prompts lookup for 'migrateezy_conversation' failed, "
+            f"using fallback prompt: {e}"
+        )
         return MIGRATEEZY_CONVERSATION_PROMPT
 
 
@@ -226,7 +248,7 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
     if not question or not question.strip():
         return {"transcript": "", "answer": "", "audio": None}
 
-    system_prompt = _get_conversation_prompt() + "\n\n## THE REFERENCE MATERIAL FOR THIS SITUATION\n\n" + json.dumps(asset, indent=2)
+    system_prompt = _load_conversation_prompt() + "\n\n## THE REFERENCE MATERIAL FOR THIS SITUATION\n\n" + json.dumps(asset, indent=2)
 
     api_messages = []
     for msg in history:
@@ -349,7 +371,7 @@ async def settlement_frame_stream(request: Request, student: dict = Depends(get_
         except (KeyError, IndexError):
             raise HTTPException(502, "Transcription failed")
 
-    system_prompt = _get_conversation_prompt() + "\n\n## THE SITUATION IN FRONT OF THE PERSON\n\n" + situation_text
+    system_prompt = _load_conversation_prompt() + "\n\n## THE SITUATION IN FRONT OF THE PERSON\n\n" + situation_text
 
     api_messages = []
     for msg in history:
