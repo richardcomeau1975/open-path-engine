@@ -18,6 +18,7 @@ from app.routers.topic_admin import router as topic_admin_router
 from app.routers.travel import router as travel_router
 from app.routers.exit_ticket import router as exit_ticket_router
 from app.routers.settlement import router as settlement_router
+from app.routers.simulation import router as simulation_router
 
 app = FastAPI(title="Open Path Engine", version="0.1.0")
 
@@ -46,6 +47,7 @@ app.include_router(topic_admin_router)
 app.include_router(travel_router)
 app.include_router(exit_ticket_router)
 app.include_router(settlement_router)
+app.include_router(simulation_router)
 
 
 @app.get("/api/health")
