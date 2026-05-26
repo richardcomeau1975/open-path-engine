@@ -105,9 +105,6 @@ async def sim_turn(request: Request, student: dict = Depends(get_current_student
         except (KeyError, IndexError):
             raise HTTPException(502, "Transcription failed")
 
-    if not question or not question.strip():
-        return {"transcript": "", "answer": "", "audio": None}
-
     counterpart_prompt = _load_prompt("migrateezy_sim_counterpart")
     system_prompt = counterpart_prompt + "\n\n## THE SCENARIO BRIEF\n\n" + json.dumps(brief, indent=2)
 
@@ -115,7 +112,14 @@ async def sim_turn(request: Request, student: dict = Depends(get_current_student
     for msg in history:
         if msg.get("role") and msg.get("content"):
             api_messages.append({"role": msg["role"], "content": msg["content"]})
-    api_messages.append({"role": "user", "content": question})
+
+    if not question or not question.strip():
+        if not api_messages:
+            api_messages.append({"role": "user", "content": "Start the conversation."})
+        else:
+            api_messages.append({"role": "user", "content": "Please continue."})
+    else:
+        api_messages.append({"role": "user", "content": question})
 
     async def generate_stream():
         yield f"data: {json.dumps({'type': 'transcript', 'text': question})}\n\n"
