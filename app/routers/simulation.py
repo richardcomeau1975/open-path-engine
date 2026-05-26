@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from app.config import settings
 from app.middleware.clerk_auth import get_current_student
 from app.services.prompt_lookup import get_prompt_for_feature
-from app.services.tts import tts_chunk
+from app.services.tts import tts_chunk, get_counterpart_voice
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,7 @@ async def sim_turn(request: Request, student: dict = Depends(get_current_student
         spoken_buffer = ""
         chunk_index = 0
         tts_client = httpx.AsyncClient(timeout=30.0)
+        cp_voice = get_counterpart_voice(language)
 
         try:
             async with client.messages.stream(
@@ -151,12 +152,12 @@ async def sim_turn(request: Request, student: dict = Depends(get_current_student
                         if not sentence.strip():
                             continue
                         yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
-                        yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
+                        yield await tts_chunk(tts_client, sentence, chunk_index, voice_id=cp_voice["voice_id"], model_id=cp_voice["model_id"])
                         chunk_index += 1
 
             if spoken_buffer.strip():
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
-                yield await tts_chunk(tts_client, spoken_buffer, chunk_index, language=language)
+                yield await tts_chunk(tts_client, spoken_buffer, chunk_index, voice_id=cp_voice["voice_id"], model_id=cp_voice["model_id"])
                 chunk_index += 1
 
         except Exception as e:

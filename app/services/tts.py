@@ -53,6 +53,23 @@ VOICE_MAP = {
 
 DEFAULT_VOICE = {"voice_id": "pFZP5JQG7iQjIQuC4Bku", "model_id": "eleven_multilingual_v2"}
 
+COUNTERPART_VOICE_MAP = {
+    "en": {"voice_id": "TX3LPaxmHKxFdv7VOQHJ", "model_id": "eleven_multilingual_v2"},
+    "hi": {"voice_id": "N2al4jd45e882svx17SU", "model_id": "eleven_multilingual_v2"},
+    "ar": {"voice_id": "IES4nrmZdUBHByLBde0P", "model_id": "eleven_multilingual_v2"},
+    "tr": {"voice_id": "fIkMvhlUiPDH5oeAd0Sx", "model_id": "eleven_multilingual_v2"},
+    "uk": {"voice_id": "GVRiwBELe0czFUAJj0nX", "model_id": "eleven_multilingual_v2"},
+    "ru": {"voice_id": "ogi2DyUAKJb7CEdqqvlU", "model_id": "eleven_multilingual_v2"},
+    "ro": {"voice_id": "S98OhkhaxeAKHEbhoLi7", "model_id": "eleven_multilingual_v2"},
+    "pl": {"voice_id": "S1JKkpuAQNsowB8ZvKRO", "model_id": "eleven_multilingual_v2"},
+    "hr": {"voice_id": "ZLYZToA7aDsMbHwM9AOr", "model_id": "eleven_multilingual_v2"},
+}
+DEFAULT_COUNTERPART = {"voice_id": "TX3LPaxmHKxFdv7VOQHJ", "model_id": "eleven_multilingual_v2"}
+
+
+def get_counterpart_voice(language_code: str) -> dict:
+    return COUNTERPART_VOICE_MAP.get(language_code, DEFAULT_COUNTERPART)
+
 
 def get_voice_for_language(language_code: str) -> dict:
     return VOICE_MAP.get(language_code, DEFAULT_VOICE)
@@ -89,8 +106,10 @@ async def tts_chunk(
                 "text": text.strip(),
                 "model_id": model,
                 "voice_settings": {
-                    "stability": 0.7,
+                    "stability": 0.45,
                     "similarity_boost": 0.75,
+                    "style": 0.25,
+                    "use_speaker_boost": True,
                 },
             },
         )
