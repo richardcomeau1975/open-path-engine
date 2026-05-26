@@ -29,6 +29,52 @@ from app.services.tts import tts_chunk
 
 logger = logging.getLogger(__name__)
 
+class AnchorParser:
+    def __init__(self):
+        self.in_anchor = False
+        self.anchor_buf = ""
+        self.speak_buf = ""
+
+    def feed(self, chunk):
+        results = []
+        self.speak_buf += chunk
+        while True:
+            if not self.in_anchor:
+                idx = self.speak_buf.find("<<<ANCHOR>>>")
+                if idx == -1:
+                    break
+                before = self.speak_buf[:idx]
+                after = self.speak_buf[idx + 12:]
+                if before:
+                    results.append(("speak", before))
+                self.speak_buf = ""
+                self.anchor_buf = after
+                self.in_anchor = True
+            else:
+                self.anchor_buf += self.speak_buf
+                self.speak_buf = ""
+                idx = self.anchor_buf.find("<<<END>>>")
+                if idx == -1:
+                    break
+                content = self.anchor_buf[:idx]
+                after = self.anchor_buf[idx + 9:]
+                results.append(("anchor", content.strip()))
+                self.anchor_buf = ""
+                self.speak_buf = after
+                self.in_anchor = False
+        return results
+
+    def flush(self):
+        results = []
+        if self.in_anchor and self.anchor_buf.strip():
+            results.append(("anchor", self.anchor_buf.strip()))
+        if self.speak_buf.strip():
+            results.append(("speak", self.speak_buf.strip()))
+        self.anchor_buf = ""
+        self.speak_buf = ""
+        return results
+
+
 router = APIRouter(prefix="/api/settlement", tags=["settlement"])
 
 DELIMITER = "###"
@@ -211,33 +257,38 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
                 }],
                 messages=api_messages,
             ) as stream:
+                parser = AnchorParser()
+                spoken_buffer = ""
+
                 async for text in stream.text_stream:
                     full_response += text
 
-                    if delimiter_seen:
-                        tail_buffer += text
-                        continue
+                    for item_type, content in parser.feed(text):
+                        if item_type == "anchor":
+                            if spoken_buffer.strip():
+                                yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
+                                yield await tts_chunk(tts_client, spoken_buffer, chunk_index, language=language)
+                                chunk_index += 1
+                                spoken_buffer = ""
+                            yield f"data: {json.dumps({'type': 'anchor', 'text': content})}\n\n"
+                        elif item_type == "speak":
+                            spoken_buffer += content
 
-                    spoken_buffer += text
-
-                    if DELIMITER in spoken_buffer:
-                        before, after = spoken_buffer.split(DELIMITER, 1)
-                        tail_buffer += after
-                        delimiter_seen = True
-                        if before.strip():
-                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': before.strip()})}\n\n"
-                            yield await tts_chunk(tts_client, before, chunk_index, language=language)
+                    while re.search(r'[.!?]\s', spoken_buffer):
+                        match = re.search(r'([.!?])\s', spoken_buffer)
+                        end = match.end()
+                        sentence = spoken_buffer[:end].strip()
+                        spoken_buffer = spoken_buffer[end:]
+                        if sentence:
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
+                            yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
                             chunk_index += 1
-                        spoken_buffer = ""
-                        continue
 
-                    while _has_tts_chunk(spoken_buffer):
-                        sentence, spoken_buffer = _extract_tts_chunk(spoken_buffer)
-                        if not sentence.strip():
-                            continue
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
-                        yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
-                        chunk_index += 1
+                for item_type, content in parser.flush():
+                    if item_type == "anchor":
+                        yield f"data: {json.dumps({'type': 'anchor', 'text': content})}\n\n"
+                    elif item_type == "speak" and content.strip():
+                        spoken_buffer += content
 
             if not delimiter_seen and spoken_buffer.strip():
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
@@ -336,33 +387,38 @@ async def settlement_frame_stream(request: Request, student: dict = Depends(get_
                 }],
                 messages=api_messages,
             ) as stream:
+                parser = AnchorParser()
+                spoken_buffer = ""
+
                 async for text in stream.text_stream:
                     full_response += text
 
-                    if delimiter_seen:
-                        tail_buffer += text
-                        continue
+                    for item_type, content in parser.feed(text):
+                        if item_type == "anchor":
+                            if spoken_buffer.strip():
+                                yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
+                                yield await tts_chunk(tts_client, spoken_buffer, chunk_index, language=language)
+                                chunk_index += 1
+                                spoken_buffer = ""
+                            yield f"data: {json.dumps({'type': 'anchor', 'text': content})}\n\n"
+                        elif item_type == "speak":
+                            spoken_buffer += content
 
-                    spoken_buffer += text
-
-                    if DELIMITER in spoken_buffer:
-                        before, after = spoken_buffer.split(DELIMITER, 1)
-                        tail_buffer += after
-                        delimiter_seen = True
-                        if before.strip():
-                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': before.strip()})}\n\n"
-                            yield await tts_chunk(tts_client, before, chunk_index, language=language)
+                    while re.search(r'[.!?]\s', spoken_buffer):
+                        match = re.search(r'([.!?])\s', spoken_buffer)
+                        end = match.end()
+                        sentence = spoken_buffer[:end].strip()
+                        spoken_buffer = spoken_buffer[end:]
+                        if sentence:
+                            yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
+                            yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
                             chunk_index += 1
-                        spoken_buffer = ""
-                        continue
 
-                    while _has_tts_chunk(spoken_buffer):
-                        sentence, spoken_buffer = _extract_tts_chunk(spoken_buffer)
-                        if not sentence.strip():
-                            continue
-                        yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
-                        yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
-                        chunk_index += 1
+                for item_type, content in parser.flush():
+                    if item_type == "anchor":
+                        yield f"data: {json.dumps({'type': 'anchor', 'text': content})}\n\n"
+                    elif item_type == "speak" and content.strip():
+                        spoken_buffer += content
 
             if not delimiter_seen and spoken_buffer.strip():
                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': spoken_buffer.strip()})}\n\n"
