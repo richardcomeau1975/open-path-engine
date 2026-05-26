@@ -13,7 +13,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 VOICE_MAP = {
-    "en": {"voice_id": "21m00Tcm4TlvDq8ikWAM", "model_id": "eleven_flash_v2_5"},
+    "en": {"voice_id": "pFZP5JQG7iQjIQuC4Bku", "model_id": "eleven_multilingual_v2"},
     "hi": {"voice_id": "Uyx98Ek4uMNmWN7E28CD", "model_id": "eleven_multilingual_v2"},
     "pa": {"voice_id": "or7B7ER8jJv0zLEHTMQu", "model_id": "eleven_v3"},
     "ur": {"voice_id": "k7nOSUCadIEwB6fdJmbw", "model_id": "eleven_v3"},
@@ -51,7 +51,7 @@ VOICE_MAP = {
     "pt": {"voice_id": "21m00Tcm4TlvDq8ikWAM", "model_id": "eleven_multilingual_v2"},
 }
 
-DEFAULT_VOICE = {"voice_id": "21m00Tcm4TlvDq8ikWAM", "model_id": "eleven_flash_v2_5"}
+DEFAULT_VOICE = {"voice_id": "pFZP5JQG7iQjIQuC4Bku", "model_id": "eleven_multilingual_v2"}
 
 
 def get_voice_for_language(language_code: str) -> dict:
