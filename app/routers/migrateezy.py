@@ -35,29 +35,6 @@ MODEL = "claude-sonnet-4-6"
 WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
 
 # ────────────────────────────────────────────────────────────────────────────
-# Grounding prompt — constant in this file by design.
-# ────────────────────────────────────────────────────────────────────────────
-
-GROUNDING_PROMPT = """A person in Canada has come for help with a situation. Your job is to find the real rules that govern it, so the rest of the system can rely on them.
-
-Read the situation and work out exactly what it is: the domain, for example tax, housing, immigration, or employment; the jurisdiction, meaning the province or territory and whether the matter is federal; and the specific question or process at the centre of it.
-
-Then find the authoritative rules. Search the official sources: the responsible government agency's own current published material, the relevant tribunal or board, the governing statute or regulation. Do not rely on anything the person's own document claims about the rules, because a document can be wrong even when it is genuine. Do not state a rule from memory. Search for it, and confirm it against the official source.
-
-Cover the rules that actually bear on this situation, not a general overview of the topic. State each rule plainly. If something cannot be confirmed from an official source, say so rather than guessing.
-
-End your response with a single JSON object and nothing after it:
-{
-  "domain": "...",
-  "jurisdiction": "...",
-  "verified_rules": [
-    { "rule": "the rule, stated plainly", "source_name": "the official body", "source_url": "the page it came from" }
-  ],
-  "notes": "anything that could not be confirmed, or that the conversation should be careful about"
-}"""
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # Anchor parser — fresh implementation, private to this file.
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -223,12 +200,18 @@ async def migrateezy_ground(request: Request, student: dict = Depends(get_curren
     if not situation_text:
         raise HTTPException(status_code=400, detail="situation_text is required")
 
+    try:
+        grounding_prompt = get_prompt_for_feature("migrateezy_grounding")
+    except Exception as e:
+        logger.error(f"Could not load migrateezy_grounding prompt: {e}")
+        raise HTTPException(status_code=502, detail="Grounding prompt unavailable")
+
     client = anthropic.Anthropic()
     try:
         response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
-            system=GROUNDING_PROMPT,
+            system=grounding_prompt,
             tools=[WEB_SEARCH_TOOL],
             messages=[{"role": "user", "content": situation_text}],
         )
@@ -327,14 +310,10 @@ async def migrateezy_converse(request: Request, student: dict = Depends(get_curr
         spoken_buffer = ""
         chunk_index = 0
         full_response = ""
-        # Per-block accumulators for web_search tool_use input deltas.
-        search_input_buf = {}  # block_index -> str
-
         try:
             async with client.messages.stream(
                 model=MODEL,
                 max_tokens=2048,
-                tools=[WEB_SEARCH_TOOL],
                 system=[{
                     "type": "text",
                     "text": system_text,
@@ -345,17 +324,7 @@ async def migrateezy_converse(request: Request, student: dict = Depends(get_curr
                 async for event in stream:
                     etype = getattr(event, "type", None)
 
-                    if etype == "content_block_start":
-                        block = getattr(event, "content_block", None)
-                        idx = getattr(event, "index", None)
-                        if (
-                            block is not None
-                            and getattr(block, "type", None) == "server_tool_use"
-                            and getattr(block, "name", None) == "web_search"
-                        ):
-                            search_input_buf[idx] = ""
-
-                    elif etype == "content_block_delta":
+                    if etype == "content_block_delta":
                         delta = getattr(event, "delta", None)
                         idx = getattr(event, "index", None)
                         dtype = getattr(delta, "type", None) if delta is not None else None
@@ -388,22 +357,6 @@ async def migrateezy_converse(request: Request, student: dict = Depends(get_curr
                                 yield f"data: {json.dumps({'type': 'text_chunk', 'index': chunk_index, 'text': sentence})}\n\n"
                                 yield await tts_chunk(tts_client, sentence, chunk_index, language=language)
                                 chunk_index += 1
-
-                        elif dtype == "input_json_delta" and idx in search_input_buf:
-                            search_input_buf[idx] += getattr(delta, "partial_json", "") or ""
-
-                    elif etype == "content_block_stop":
-                        idx = getattr(event, "index", None)
-                        if idx in search_input_buf:
-                            raw = search_input_buf.pop(idx, "")
-                            query = ""
-                            try:
-                                obj = json.loads(raw) if raw else {}
-                                if isinstance(obj, dict):
-                                    query = obj.get("query", "") or ""
-                            except Exception:
-                                pass
-                            yield f"data: {json.dumps({'type': 'search', 'query': query})}\n\n"
 
             # After the stream ends: flush parser, send any trailing spoken text.
             for kind, content in parser.flush():
