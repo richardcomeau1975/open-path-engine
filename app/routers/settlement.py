@@ -252,8 +252,10 @@ async def settlement_converse_stream(request: Request, student: dict = Depends(g
 
     api_messages = []
     for msg in history:
-        if msg.get("role") and msg.get("content"):
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
             api_messages.append({"role": msg["role"], "content": msg["content"]})
+    while api_messages and api_messages[0]["role"] != "user":
+        api_messages.pop(0)
     api_messages.append({"role": "user", "content": question})
 
     async def generate_stream():
@@ -375,8 +377,10 @@ async def settlement_frame_stream(request: Request, student: dict = Depends(get_
 
     api_messages = []
     for msg in history:
-        if msg.get("role") and msg.get("content"):
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
             api_messages.append({"role": msg["role"], "content": msg["content"]})
+    while api_messages and api_messages[0]["role"] != "user":
+        api_messages.pop(0)
 
     if question and question.strip():
         api_messages.append({"role": "user", "content": question})
