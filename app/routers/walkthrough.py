@@ -114,6 +114,7 @@ async def start_session(topic_id: str, request: Request, student: dict = Depends
             .select("*") \
             .eq("id", session_id) \
             .eq("student_id", student["id"]) \
+            .eq("topic_id", topic_id) \
             .execute()
         if not result.data:
             raise HTTPException(404, "Session not found")
@@ -160,6 +161,7 @@ async def send_message(topic_id: str, request: Request, student: dict = Depends(
         .select("*") \
         .eq("id", session_id) \
         .eq("student_id", student["id"]) \
+        .eq("topic_id", topic_id) \
         .execute()
 
     if not session_result.data:
