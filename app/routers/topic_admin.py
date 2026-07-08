@@ -18,6 +18,8 @@ from app.services.r2 import (
     upload_text_to_r2,
     upload_bytes_to_r2,
     generate_presigned_url,
+    delete_from_r2,
+    delete_r2_prefix,
 )
 from app.services.modifier_assembly import gather_modifiers
 
@@ -441,6 +443,10 @@ async def upload_admin_output(
 
     content_type = CONTENT_TYPE_MAP.get(output_type, "application/octet-stream")
 
+    if output_type == "learning_asset":
+        cleared = delete_r2_prefix(f"{topic_id}/segments/")
+        logger.info(f"Replace learning_asset [{topic_id}] — cleared {cleared} stale segment objects")
+
     if output_type in ARRAY_COLUMNS:
         # Multi-file: upload each file, collect keys
         keys = []
@@ -491,9 +497,16 @@ async def delete_admin_output(
     """Set the DB column for an output type to NULL (single) or empty array (multi)."""
     _validate_output_type(output_type)
     sb = get_supabase()
-    _get_topic_or_404(sb, topic_id)
+    topic = _get_topic_or_404(sb, topic_id)
 
     col = COLUMN_MAP[output_type]
+
+    if output_type == "learning_asset":
+        asset_key = topic.get(col)
+        if asset_key:
+            delete_from_r2(asset_key)
+        cleared = delete_r2_prefix(f"{topic_id}/segments/")
+        logger.info(f"Delete learning_asset [{topic_id}] — removed asset file and {cleared} stale segment objects from R2")
 
     if output_type in ARRAY_COLUMNS:
         sb.table("topics").update({col: []}).eq("id", topic_id).execute()
