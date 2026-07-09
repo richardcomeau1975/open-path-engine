@@ -22,6 +22,7 @@ from app.services.r2 import (
     delete_r2_prefix,
 )
 from app.services.modifier_assembly import gather_modifiers
+from app.services import generation_runs
 
 # Text generators
 from app.services.generators.learning_asset import (
@@ -56,35 +57,6 @@ from app.services.generators.narration_audio import generate_narration_audio
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["topic-admin"])
-
-# ---------------------------------------------------------------------------
-# In-memory generation progress tracker
-# ---------------------------------------------------------------------------
-# Keyed by topic_id. Each entry: { "steps": [...], "current": "step_name", "status": "running"/"done"/"failed", "error": "" }
-_generation_progress = {}
-
-
-def _set_progress(topic_id: str, steps: list, current: str = None, status: str = "running", error: str = ""):
-    _generation_progress[topic_id] = {
-        "steps": steps,
-        "current": current,
-        "status": status,
-        "error": error,
-    }
-
-
-def _update_step_status(topic_id: str, step: str, step_status: str, error: str = ""):
-    if topic_id in _generation_progress:
-        entry = _generation_progress[topic_id]
-        for s in entry["steps"]:
-            if s["name"] == step:
-                s["status"] = step_status
-                if error:
-                    s["error"] = error
-                break
-        if step_status == "running":
-            entry["current"] = step
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -380,11 +352,20 @@ async def get_generation_progress(
     topic_id: str,
     student: dict = Depends(require_admin_student),
 ):
-    """Return in-flight generation progress for a topic."""
-    progress = _generation_progress.get(topic_id)
-    if not progress:
+    """Return the latest generation run for a topic (durable, survives deploys)."""
+    run = generation_runs.get_latest_run(topic_id)
+    if not run:
         return {"active": False}
-    return {"active": True, **progress}
+    current = next((s["name"] for s in run["steps"] if s["status"] == "running"), None)
+    return {
+        "active": run["status"] == "running",
+        "run_id": run["id"],
+        "status": run["status"],
+        "current": current,
+        "steps": run["steps"],
+        "source": run["source"],
+        "created_at": run["created_at"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -526,58 +507,73 @@ async def generate_admin_output(
     output_type: str,
     student: dict = Depends(require_admin_student),
 ):
-    """Generate ONE output in the background. Returns immediately."""
+    """Generate ONE output in the background. Returns immediately. Rejects if a run is already live."""
     _validate_output_type(output_type)
     sb = get_supabase()
     _get_topic_or_404(sb, topic_id)
 
-    _set_progress(topic_id, [{"name": output_type, "status": "running", "error": ""}], current=output_type)
+    existing = generation_runs.get_active_run(topic_id)
+    if existing:
+        return {
+            "output_type": output_type,
+            "status": "already_running",
+            "run_id": existing["id"],
+            "steps": existing["steps"],
+        }
+
+    # podcast_script has an auto-chain; make it visible as tracked steps
+    if output_type == "podcast_script":
+        step_names = ["podcast_script", "lecture_segments", "podcast_audio"]
+    else:
+        step_names = [output_type]
+
+    run = generation_runs.create_run(topic_id, f"admin_generate:{output_type}", step_names)
+    run_id = run["id"]
+    generation_runs.set_topic_generation_status(topic_id, "generating")
 
     async def _bg():
         try:
             bg_sb = get_supabase()
+            generation_runs.update_step(run_id, output_type, "running")
             if output_type in TEXT_OUTPUT_TYPES:
                 await _generate_text_output(topic_id, output_type, bg_sb, student)
             else:
                 await _generate_media_output(topic_id, output_type, bg_sb)
-            _update_step_status(topic_id, output_type, "done")
-            _generation_progress[topic_id]["status"] = "done"
-            _generation_progress[topic_id]["current"] = None
+            generation_runs.update_step(run_id, output_type, "done")
             logger.info(f"admin generate [{topic_id}] — {output_type} completed")
 
-            # Auto-chain: podcast_script → split segments → podcast_audio → lecture images
             if output_type == "podcast_script":
+                generation_runs.update_step(run_id, "lecture_segments", "running")
                 try:
-                    # Step 1: Split into segments
-                    logger.info(f"admin generate [{topic_id}] — auto-splitting lecture into segments")
                     from app.services.generators.lecture_segments import split_and_store_segments
                     manifest = await split_and_store_segments(topic_id, bg_sb)
+                    generation_runs.update_step(run_id, "lecture_segments", "done")
                     logger.info(f"admin generate [{topic_id}] — split into {manifest['segment_count']} segments")
+                except Exception as e:
+                    generation_runs.update_step(run_id, "lecture_segments", "failed", str(e))
+                    logger.error(f"admin generate [{topic_id}] — segment split failed: {e}")
 
-                    # Step 2: Generate audio per segment
-                    logger.info(f"admin generate [{topic_id}] — auto-chaining to podcast_audio")
+                generation_runs.update_step(run_id, "podcast_audio", "running")
+                try:
                     from app.services.generators.podcast_audio import generate_podcast_audio
                     await generate_podcast_audio(topic_id, bg_sb)
+                    generation_runs.update_step(run_id, "podcast_audio", "done")
                     logger.info(f"admin generate [{topic_id}] — podcast_audio auto-chain completed")
-
-                    # Image generation disabled — lectures use GSAP text anchoring instead
-                    # # Step 3: Generate images per segment
-                    # logger.info(f"admin generate [{topic_id}] — auto-chaining to lecture images")
-                    # from app.services.generators.images import generate_lecture_images
-                    # await generate_lecture_images(topic_id, bg_sb)
-                    # logger.info(f"admin generate [{topic_id}] — lecture images auto-chain completed")
-                    logger.info(f"generate-from [{topic_id}] — lecture_images skipped (GSAP text anchoring)")
-
                 except Exception as e:
-                    logger.error(f"admin generate [{topic_id}] — auto-chain failed: {e}")
+                    generation_runs.update_step(run_id, "podcast_audio", "failed", str(e))
+                    logger.error(f"admin generate [{topic_id}] — podcast_audio auto-chain failed: {e}")
 
         except Exception as e:
-            _update_step_status(topic_id, output_type, "failed", str(e))
-            _generation_progress[topic_id]["status"] = "failed"
+            generation_runs.update_step(run_id, output_type, "failed", str(e))
             logger.error(f"admin generate [{topic_id}] — {output_type} failed: {e}")
+        finally:
+            final = generation_runs.finish_run(run_id)
+            generation_runs.set_topic_generation_status(
+                topic_id, "completed" if final == "done" else "failed"
+            )
 
     asyncio.create_task(_bg())
-    return {"output_type": output_type, "status": "started"}
+    return {"output_type": output_type, "status": "started", "run_id": run_id, "steps": step_names}
 
 
 # ---------------------------------------------------------------------------
@@ -742,7 +738,7 @@ async def generate_downstream(
 ):
     """
     Generate all downstream outputs from the given output type.
-    Runs sequentially. Continues on failure. Returns status for each step.
+    Runs sequentially. Continues on failure. Rejects if a run is already live.
     """
     if output_type not in DOWNSTREAM_MAP:
         raise HTTPException(
@@ -754,153 +750,163 @@ async def generate_downstream(
     sb = get_supabase()
     _get_topic_or_404(sb, topic_id)
 
+    existing = generation_runs.get_active_run(topic_id)
+    if existing:
+        return {
+            "source_type": output_type,
+            "status": "already_running",
+            "run_id": existing["id"],
+            "steps": existing["steps"],
+        }
+
     steps = DOWNSTREAM_MAP[output_type]
 
-    # Initialize progress tracking
-    step_list = [{"name": s, "status": "pending", "error": ""} for s in steps]
-    _set_progress(topic_id, step_list, status="running")
+    # Visible step list: include the segment split where it actually happens
+    step_names = []
+    for s in steps:
+        step_names.append(s)
+        if s == "podcast_script":
+            step_names.append("lecture_segments")
+
+    run = generation_runs.create_run(topic_id, f"admin_generate_from:{output_type}", step_names)
+    run_id = run["id"]
+    generation_runs.set_topic_generation_status(topic_id, "generating")
 
     async def _bg_downstream():
-        bg_sb = get_supabase()
-        topic = _get_topic_or_404(bg_sb, topic_id)
-        course_id = topic.get("course_id")
-        student_id = student.get("id")
+        try:
+            bg_sb = get_supabase()
+            topic = _get_topic_or_404(bg_sb, topic_id)
+            course_id = topic.get("course_id")
+            student_id = student.get("id")
 
-        text_steps = [s for s in steps if s in TEXT_OUTPUT_TYPES]
-        media_steps = [s for s in steps if s in MEDIA_OUTPUT_TYPES]
+            text_steps = [s for s in steps if s in TEXT_OUTPUT_TYPES]
+            media_steps = [s for s in steps if s in MEDIA_OUTPUT_TYPES]
 
-        # ── BATCH TEXT STEPS (50% cheaper) ──────────────────────
-        if len(text_steps) > 1:
-            for s in text_steps:
-                _update_step_status(topic_id, s, "running")
-            try:
-                upstream = await _read_upstream_text(topic_id, "podcast_script", bg_sb)
-
-                batch_requests = []
-                for step in text_steps:
-                    if step == "podcast_script":
-                        prompt = await build_podcast_script_prompt(
-                            topic_id, bg_sb, upstream,
-                            student_id=student_id, course_id=course_id,
-                        )
-                        batch_requests.append({
-                            "custom_id": step, "model": PS_MODEL,
-                            "max_tokens": PS_MAX_TOKENS, "prompt": prompt,
-                        })
-                    elif step == "notechart":
-                        prompt = await build_notechart_prompt(
-                            topic_id, bg_sb, upstream,
-                            student_id=student_id, course_id=course_id,
-                        )
-                        batch_requests.append({
-                            "custom_id": step, "model": NC_MODEL,
-                            "max_tokens": NC_MAX_TOKENS, "prompt": prompt,
-                        })
-                    elif step == "visual_overview_script":
-                        prompt = await build_visual_overview_prompt(
-                            topic_id, bg_sb, upstream,
-                            student_id=student_id, course_id=course_id,
-                        )
-                        batch_requests.append({
-                            "custom_id": step, "model": VO_MODEL,
-                            "max_tokens": VO_MAX_TOKENS, "prompt": prompt,
-                        })
-
-                logger.info(f"generate-from [{topic_id}] — batching {len(batch_requests)} Sonnet calls")
-                results = await run_anthropic_batch(batch_requests)
-
-                for step in text_steps:
-                    text = results.get(step)
-                    if text:
-                        if step == "podcast_script":
-                            await store_podcast_script_result(topic_id, bg_sb, text)
-                        elif step == "notechart":
-                            await store_notechart_result(topic_id, bg_sb, text)
-                        elif step == "visual_overview_script":
-                            await store_visual_overview_result(topic_id, bg_sb, text)
-                        _update_step_status(topic_id, step, "done")
-                        logger.info(f"generate-from [{topic_id}] — {step} completed ({len(text)} chars)")
-                    else:
-                        _update_step_status(topic_id, step, "failed", "No result from batch")
-                        logger.error(f"generate-from [{topic_id}] — {step} failed in batch")
-
-            except Exception as e:
+            # ── BATCH TEXT STEPS (50% cheaper) ──────────────────────
+            if len(text_steps) > 1:
                 for s in text_steps:
-                    _update_step_status(topic_id, s, "failed", str(e))
-                logger.error(f"generate-from [{topic_id}] — batch text generation failed: {e}")
-
-        elif len(text_steps) == 1:
-            step = text_steps[0]
-            _update_step_status(topic_id, step, "running")
-            try:
-                await _generate_text_output(topic_id, step, bg_sb, student)
-                _update_step_status(topic_id, step, "done")
-                logger.info(f"generate-from [{topic_id}] — {step} completed")
-            except Exception as e:
-                _update_step_status(topic_id, step, "failed", str(e))
-                logger.error(f"generate-from [{topic_id}] — {step} failed: {e}")
-
-        # If podcast_script was just produced, split it into segments BEFORE
-        # podcast_audio runs, so the audio generator produces per-segment .wav
-        # files (manifest-driven) instead of a monolithic fallback.
-        if "podcast_script" in text_steps:
-            try:
-                from app.services.generators.lecture_segments import split_and_store_segments
-                manifest = await split_and_store_segments(topic_id, bg_sb)
-                logger.info(f"generate-from [{topic_id}] — split into {manifest['segment_count']} lecture segments")
-            except Exception as e:
-                logger.error(f"generate-from [{topic_id}] — segment split failed (continuing): {e}")
-
-        # ── MEDIA STEPS ─────────────────────────────────────────
-        if media_steps:
-            if "visual_overview_images" in media_steps:
-                _update_step_status(topic_id, "visual_overview_images", "running")
+                    generation_runs.update_step(run_id, s, "running")
                 try:
-                    await _generate_media_output(topic_id, "visual_overview_images", bg_sb)
-                    _update_step_status(topic_id, "visual_overview_images", "done")
-                    logger.info(f"generate-from [{topic_id}] — visual_overview_images completed")
-                except Exception as e:
-                    _update_step_status(topic_id, "visual_overview_images", "failed", str(e))
-                    logger.error(f"generate-from [{topic_id}] — visual_overview_images failed: {e}")
+                    upstream = await _read_upstream_text(topic_id, "podcast_script", bg_sb)
 
-            if "podcast_audio" in media_steps:
-                _update_step_status(topic_id, "podcast_audio", "running")
+                    batch_requests = []
+                    for step in text_steps:
+                        if step == "podcast_script":
+                            prompt = await build_podcast_script_prompt(
+                                topic_id, bg_sb, upstream,
+                                student_id=student_id, course_id=course_id,
+                            )
+                            batch_requests.append({
+                                "custom_id": step, "model": PS_MODEL,
+                                "max_tokens": PS_MAX_TOKENS, "prompt": prompt,
+                            })
+                        elif step == "notechart":
+                            prompt = await build_notechart_prompt(
+                                topic_id, bg_sb, upstream,
+                                student_id=student_id, course_id=course_id,
+                            )
+                            batch_requests.append({
+                                "custom_id": step, "model": NC_MODEL,
+                                "max_tokens": NC_MAX_TOKENS, "prompt": prompt,
+                            })
+                        elif step == "visual_overview_script":
+                            prompt = await build_visual_overview_prompt(
+                                topic_id, bg_sb, upstream,
+                                student_id=student_id, course_id=course_id,
+                            )
+                            batch_requests.append({
+                                "custom_id": step, "model": VO_MODEL,
+                                "max_tokens": VO_MAX_TOKENS, "prompt": prompt,
+                            })
+
+                    logger.info(f"generate-from [{topic_id}] — batching {len(batch_requests)} Sonnet calls")
+                    results = await run_anthropic_batch(batch_requests)
+
+                    for step in text_steps:
+                        text = results.get(step)
+                        if text:
+                            if step == "podcast_script":
+                                await store_podcast_script_result(topic_id, bg_sb, text)
+                            elif step == "notechart":
+                                await store_notechart_result(topic_id, bg_sb, text)
+                            elif step == "visual_overview_script":
+                                await store_visual_overview_result(topic_id, bg_sb, text)
+                            generation_runs.update_step(run_id, step, "done")
+                            logger.info(f"generate-from [{topic_id}] — {step} completed ({len(text)} chars)")
+                        else:
+                            generation_runs.update_step(run_id, step, "failed", "No result from batch")
+                            logger.error(f"generate-from [{topic_id}] — {step} failed in batch")
+
+                except Exception as e:
+                    for s in text_steps:
+                        generation_runs.update_step(run_id, s, "failed", str(e))
+                    logger.error(f"generate-from [{topic_id}] — batch text generation failed: {e}")
+
+            elif len(text_steps) == 1:
+                step = text_steps[0]
+                generation_runs.update_step(run_id, step, "running")
                 try:
-                    await _generate_media_output(topic_id, "podcast_audio", bg_sb)
-                    _update_step_status(topic_id, "podcast_audio", "done")
-                    logger.info(f"generate-from [{topic_id}] — podcast_audio completed")
+                    await _generate_text_output(topic_id, step, bg_sb, student)
+                    generation_runs.update_step(run_id, step, "done")
+                    logger.info(f"generate-from [{topic_id}] — {step} completed")
                 except Exception as e:
-                    _update_step_status(topic_id, "podcast_audio", "failed", str(e))
-                    logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
+                    generation_runs.update_step(run_id, step, "failed", str(e))
+                    logger.error(f"generate-from [{topic_id}] — {step} failed: {e}")
 
-                # Image generation disabled — lectures use GSAP text anchoring instead
-                # # After lecture audio, generate per-segment lecture images
-                # # (reads image_prompts from the lecture manifest, not the visual_overview script)
-                # try:
-                #     from app.services.generators.images import generate_lecture_images
-                #     await generate_lecture_images(topic_id, bg_sb)
-                #     logger.info(f"generate-from [{topic_id}] — lecture_images completed")
-                # except Exception as e:
-                #     logger.error(f"generate-from [{topic_id}] — lecture_images failed (continuing): {e}")
-                logger.info(f"generate-from [{topic_id}] — lecture_images skipped (GSAP text anchoring)")
+            # Split lecture into segments BEFORE podcast_audio runs
+            if "podcast_script" in text_steps:
+                generation_runs.update_step(run_id, "lecture_segments", "running")
+                try:
+                    from app.services.generators.lecture_segments import split_and_store_segments
+                    manifest = await split_and_store_segments(topic_id, bg_sb)
+                    generation_runs.update_step(run_id, "lecture_segments", "done")
+                    logger.info(f"generate-from [{topic_id}] — split into {manifest['segment_count']} lecture segments")
+                except Exception as e:
+                    generation_runs.update_step(run_id, "lecture_segments", "failed", str(e))
+                    logger.error(f"generate-from [{topic_id}] — segment split failed (continuing): {e}")
 
-            if "narration_audio" in media_steps:
+            # ── MEDIA STEPS ─────────────────────────────────────────
+            if media_steps:
+                if "visual_overview_images" in media_steps:
+                    generation_runs.update_step(run_id, "visual_overview_images", "running")
+                    try:
+                        await _generate_media_output(topic_id, "visual_overview_images", bg_sb)
+                        generation_runs.update_step(run_id, "visual_overview_images", "done")
+                        logger.info(f"generate-from [{topic_id}] — visual_overview_images completed")
+                    except Exception as e:
+                        generation_runs.update_step(run_id, "visual_overview_images", "failed", str(e))
+                        logger.error(f"generate-from [{topic_id}] — visual_overview_images failed: {e}")
+
                 if "podcast_audio" in media_steps:
-                    logger.info(f"generate-from [{topic_id}] — waiting 10s between TTS generators")
-                    await asyncio.sleep(10)
-                _update_step_status(topic_id, "narration_audio", "running")
-                try:
-                    await _generate_media_output(topic_id, "narration_audio", bg_sb)
-                    _update_step_status(topic_id, "narration_audio", "done")
-                    logger.info(f"generate-from [{topic_id}] — narration_audio completed")
-                except Exception as e:
-                    _update_step_status(topic_id, "narration_audio", "failed", str(e))
-                    logger.error(f"generate-from [{topic_id}] — narration_audio failed: {e}")
+                    generation_runs.update_step(run_id, "podcast_audio", "running")
+                    try:
+                        await _generate_media_output(topic_id, "podcast_audio", bg_sb)
+                        generation_runs.update_step(run_id, "podcast_audio", "done")
+                        logger.info(f"generate-from [{topic_id}] — podcast_audio completed")
+                    except Exception as e:
+                        generation_runs.update_step(run_id, "podcast_audio", "failed", str(e))
+                        logger.error(f"generate-from [{topic_id}] — podcast_audio failed: {e}")
 
-        # Mark overall progress as done
-        if topic_id in _generation_progress:
-            _generation_progress[topic_id]["status"] = "done"
-            _generation_progress[topic_id]["current"] = None
+                    logger.info(f"generate-from [{topic_id}] — lecture_images skipped (GSAP text anchoring)")
+
+                if "narration_audio" in media_steps:
+                    if "podcast_audio" in media_steps:
+                        logger.info(f"generate-from [{topic_id}] — waiting 10s between TTS generators")
+                        await asyncio.sleep(10)
+                    generation_runs.update_step(run_id, "narration_audio", "running")
+                    try:
+                        await _generate_media_output(topic_id, "narration_audio", bg_sb)
+                        generation_runs.update_step(run_id, "narration_audio", "done")
+                        logger.info(f"generate-from [{topic_id}] — narration_audio completed")
+                    except Exception as e:
+                        generation_runs.update_step(run_id, "narration_audio", "failed", str(e))
+                        logger.error(f"generate-from [{topic_id}] — narration_audio failed: {e}")
+
+        finally:
+            final = generation_runs.finish_run(run_id)
+            generation_runs.set_topic_generation_status(
+                topic_id, "completed" if final == "done" else "failed"
+            )
 
     asyncio.create_task(_bg_downstream())
-    return {"source_type": output_type, "status": "started", "steps": steps}
+    return {"source_type": output_type, "status": "started", "run_id": run_id, "steps": step_names}
