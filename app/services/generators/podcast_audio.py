@@ -28,10 +28,39 @@ CHANNELS = 1
 SAMPLE_WIDTH = 2  # 16-bit PCM
 
 # Cloud TTS multi-speaker voice mapping (hard limit: 2 speakers)
-SPEAKER_VOICE_CONFIGS = [
-    {"speakerAlias": "EXPERT", "speakerId": "Algieba"},
-    {"speakerAlias": "HOST", "speakerId": "Puck"},
-]
+VOICE_PRESETS = {
+    "standard": [
+        {"speakerAlias": "EXPERT", "speakerId": "Algieba"},
+        {"speakerAlias": "HOST", "speakerId": "Gacrux"},
+    ],
+    "classic": [
+        {"speakerAlias": "EXPERT", "speakerId": "Kore"},
+        {"speakerAlias": "HOST", "speakerId": "Puck"},
+    ],
+    "bright": [
+        {"speakerAlias": "EXPERT", "speakerId": "Puck"},
+        {"speakerAlias": "HOST", "speakerId": "Zephyr"},
+    ],
+}
+DEFAULT_VOICE_PRESET = "standard"
+
+
+def _resolve_voice_configs(topic_id: str) -> list:
+    """Resolve the topic's voice preset to speaker configs; fall back to default."""
+    preset = None
+    try:
+        sb = get_supabase()
+        result = sb.table("topics").select("voice_preset").eq("id", topic_id).limit(1).execute()
+        if result.data:
+            preset = result.data[0].get("voice_preset")
+    except Exception as e:
+        logger.warning(f"Voice preset lookup failed for {topic_id}, using default: {e}")
+    if preset not in VOICE_PRESETS:
+        if preset:
+            logger.warning(f"Unknown voice preset '{preset}' for {topic_id}, using default")
+        preset = DEFAULT_VOICE_PRESET
+    logger.info(f"Lecture audio [{topic_id}] — voice preset: {preset}")
+    return VOICE_PRESETS[preset]
 
 DEFAULT_TTS_STYLE_PROMPT = "Read the following dialogue naturally, matching each speaker's personality."
 
@@ -201,7 +230,7 @@ def _parse_speaker_turns(script_text: str) -> list[dict]:
     return turns
 
 
-async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient, style_prompt: str) -> bytes:
+async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient, style_prompt: str, speaker_configs: list) -> bytes:
     """
     Call Google Cloud Text-to-Speech with Gemini multi-speaker. Returns raw PCM bytes.
     Auth: service account Bearer token (Cloud TTS + Gemini requires OAuth, not an API key).
@@ -224,7 +253,7 @@ async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClie
             "languageCode": "en-us",
             "modelName": "gemini-2.5-flash-preview-tts",
             "multiSpeakerVoiceConfig": {
-                "speakerVoiceConfigs": SPEAKER_VOICE_CONFIGS,
+                "speakerVoiceConfigs": speaker_configs,
             },
         },
         "audioConfig": {
@@ -255,6 +284,7 @@ async def _tts_chunks(topic_id: str, label: str, chunks: list[str]) -> tuple:
     """
     all_pcm_parts = []
     style_prompt = _get_tts_style_prompt()
+    speaker_configs = _resolve_voice_configs(topic_id)
     logger.info(f"Lecture audio [{topic_id}] — TTS style prompt ({len(style_prompt)} chars)")
 
     async with httpx.AsyncClient(timeout=300.0) as tts_client:
@@ -267,7 +297,7 @@ async def _tts_chunks(topic_id: str, label: str, chunks: list[str]) -> tuple:
             pcm = None
             for attempt in range(max_retries + 1):
                 try:
-                    pcm = await _gemini_multi_speaker_tts(chunk, tts_client, style_prompt)
+                    pcm = await _gemini_multi_speaker_tts(chunk, tts_client, style_prompt, speaker_configs)
                     break
                 except Exception as e:
                     if attempt < max_retries:
