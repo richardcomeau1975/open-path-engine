@@ -17,6 +17,7 @@ import httpx
 import google.auth.transport.requests
 from google.oauth2 import service_account
 from app.config import settings
+from app.services.supabase import get_supabase
 from app.services.r2 import download_from_r2, upload_text_to_r2, upload_bytes_to_r2
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,31 @@ SAMPLE_WIDTH = 2  # 16-bit PCM
 
 # Cloud TTS multi-speaker voice mapping (hard limit: 2 speakers)
 SPEAKER_VOICE_CONFIGS = [
-    {"speakerAlias": "EXPERT", "speakerId": "Kore"},
+    {"speakerAlias": "EXPERT", "speakerId": "Algieba"},
     {"speakerAlias": "HOST", "speakerId": "Puck"},
 ]
+
+DEFAULT_TTS_STYLE_PROMPT = "Read the following dialogue naturally, matching each speaker's personality."
+
+
+def _get_tts_style_prompt() -> str:
+    """Fetch the active lecture TTS style prompt from base_prompts; fall back to default."""
+    try:
+        sb = get_supabase()
+        result = (
+            sb.table("base_prompts")
+            .select("content")
+            .eq("feature", "lecture_tts_style")
+            .eq("is_active", True)
+            .order("version", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data and result.data[0].get("content"):
+            return result.data[0]["content"].strip()
+    except Exception as e:
+        logger.warning(f"TTS style prompt lookup failed, using default: {e}")
+    return DEFAULT_TTS_STYLE_PROMPT
 
 
 # Cached service account credentials (module-level; refresh-on-demand)
@@ -178,7 +201,7 @@ def _parse_speaker_turns(script_text: str) -> list[dict]:
     return turns
 
 
-async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient) -> bytes:
+async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClient, style_prompt: str) -> bytes:
     """
     Call Google Cloud Text-to-Speech with Gemini multi-speaker. Returns raw PCM bytes.
     Auth: service account Bearer token (Cloud TTS + Gemini requires OAuth, not an API key).
@@ -192,7 +215,7 @@ async def _gemini_multi_speaker_tts(chunk_text: str, tts_client: httpx.AsyncClie
 
     payload = {
         "input": {
-            "prompt": "Read the following dialogue naturally, matching each speaker's personality.",
+            "prompt": style_prompt,
             "multiSpeakerMarkup": {
                 "turns": turns,
             },
@@ -231,6 +254,8 @@ async def _tts_chunks(topic_id: str, label: str, chunks: list[str]) -> tuple:
     Returns (combined_pcm_bytes, total_duration_seconds).
     """
     all_pcm_parts = []
+    style_prompt = _get_tts_style_prompt()
+    logger.info(f"Lecture audio [{topic_id}] — TTS style prompt ({len(style_prompt)} chars)")
 
     async with httpx.AsyncClient(timeout=300.0) as tts_client:
         for i, chunk in enumerate(chunks):
@@ -242,7 +267,7 @@ async def _tts_chunks(topic_id: str, label: str, chunks: list[str]) -> tuple:
             pcm = None
             for attempt in range(max_retries + 1):
                 try:
-                    pcm = await _gemini_multi_speaker_tts(chunk, tts_client)
+                    pcm = await _gemini_multi_speaker_tts(chunk, tts_client, style_prompt)
                     break
                 except Exception as e:
                     if attempt < max_retries:
