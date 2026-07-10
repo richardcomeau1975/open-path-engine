@@ -11,7 +11,7 @@ import anthropic
 
 from app.services.supabase import get_supabase
 from app.middleware.clerk_auth import get_current_student
-from app.services.r2 import download_from_r2
+from app.services.r2 import download_from_r2, generate_presigned_url
 from app.services.prompt_lookup import get_prompt_for_feature
 from app.services.modifier_assembly import gather_modifiers
 
@@ -57,6 +57,46 @@ def _load_segment_content(topic_id, segment_number, supabase):
     return learning_asset, course_id
 
 
+def _load_scene(topic_id, segment_number):
+    """Load the generated exit ticket scene set for a segment, or None if absent."""
+    try:
+        raw = download_from_r2(
+            f"{topic_id}/exit_ticket/segment_{segment_number}_scene.json"
+        ).decode("utf-8")
+        scene = json.loads(raw)
+        if scene.get("scenes") and scene.get("answer_key"):
+            return scene
+    except Exception:
+        pass
+    return None
+
+
+def _scene_transcript(scene) -> str:
+    lines = []
+    for scene_idx, single_scene in enumerate(scene.get("scenes", [])):
+        lines.append(f"[Conversation {scene_idx + 1}]")
+        for line in single_scene.get("lines", []):
+            speaker = line.get("speaker", "A")
+            text = (line.get("text") or "").strip()
+            if text:
+                lines.append(f"{speaker}: {text}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _scene_flat_tasks(scene) -> list:
+    """Flatten per-conversation questions into the tasks list, tagging each with its conversation index."""
+    tasks = []
+    for scene_idx, single_scene in enumerate(scene.get("scenes", [])):
+        for q in single_scene.get("questions", []):
+            tasks.append({
+                "task": q.get("question", ""),
+                "dots": q.get("dots", []),
+                "scene": scene_idx,
+            })
+    return tasks
+
+
 def _build_system_prompt(base_prompt, modifier_text, learning_asset, segment_number):
     """Assemble system prompt from parts."""
     parts = [base_prompt]
@@ -96,7 +136,24 @@ async def start_exit_ticket(
         if result["status"] in ("in_progress", "pass"):
             return {"result": result}
 
-    # Load content
+    # Scene path: generated conversations carry their own questions
+    scene = _load_scene(topic_id, segment_number)
+    if scene:
+        result_data = {
+            "topic_id": topic_id,
+            "segment_number": segment_number,
+            "student_id": student["id"],
+            "tasks": _scene_flat_tasks(scene),
+            "responses": None,
+            "evaluation": None,
+            "status": "in_progress",
+        }
+        insert_result = (
+            supabase.table("exit_ticket_results").insert(result_data).execute()
+        )
+        return {"result": insert_result.data[0], "mode": "scene"}
+
+    # Legacy path
     learning_asset, course_id = _load_segment_content(
         topic_id, segment_number, supabase
     )
@@ -205,7 +262,9 @@ async def submit_exit_ticket(
     result = existing.data[0]
     tasks = result["tasks"]
 
-    # Load content for evaluation
+    scene = _load_scene(topic_id, segment_number)
+
+    # Load content for evaluation (legacy context; also supplies course_id)
     learning_asset, course_id = _load_segment_content(
         topic_id, segment_number, supabase
     )
@@ -229,9 +288,24 @@ async def submit_exit_ticket(
         topic_id=topic_id,
     )
 
-    system_prompt = _build_system_prompt(
-        base_prompt, modifier_text, learning_asset, segment_number
-    )
+    if scene:
+        parts = [base_prompt]
+        if modifier_text:
+            parts.append(f"---\n\nMODIFIERS:\n\n{modifier_text}")
+        parts.append(
+            "---\n\nThe student listened to the conversation(s) below and answered "
+            "questions attached to each. Evaluate ONLY against these conversations "
+            "and the answer key — never require outside knowledge. A question is "
+            "demonstrated only when the student names the relevant idea AND anchors "
+            "it in something that happened in its conversation."
+        )
+        parts.append(f"---\n\nCONVERSATIONS:\n\n{_scene_transcript(scene)}")
+        parts.append(f"---\n\nANSWER KEY:\n\n{scene.get('answer_key', '')}")
+        system_prompt = "\n\n".join(parts)
+    else:
+        system_prompt = _build_system_prompt(
+            base_prompt, modifier_text, learning_asset, segment_number
+        )
 
     # Build evaluation request
     eval_content = "TASKS AND STUDENT RESPONSES:\n\n"
@@ -345,3 +419,24 @@ async def get_all_exit_ticket_statuses(
             status_map[seg] = r["status"]
 
     return {"statuses": status_map}
+
+
+@router.get("/{topic_id}/scene")
+async def get_exit_ticket_scene(
+    topic_id: str, request: Request, student: dict = Depends(get_current_student)
+):
+    """Presigned audio per conversation. NEVER includes the answer key or dialogue text."""
+    segment_number = request.query_params.get("segment_number")
+    if not segment_number:
+        raise HTTPException(400, "segment_number query param required")
+
+    scene = _load_scene(topic_id, int(segment_number))
+    if not scene:
+        return {"exists": False}
+
+    blocks = []
+    for scene_idx in range(len(scene["scenes"])):
+        audio_key = f"{topic_id}/exit_ticket/segment_{segment_number}_scene_{scene_idx + 1}.wav"
+        blocks.append({"audio_url": generate_presigned_url(audio_key)})
+
+    return {"exists": True, "blocks": blocks}
