@@ -431,6 +431,11 @@ async def upload_admin_output(
             logger.info(f"Replace learning_asset [{topic_id}] — cleared stale quiz.json")
         except Exception:
             pass
+        try:
+            cleared_scenes = delete_r2_prefix(f"{topic_id}/exit_ticket/")
+            logger.info(f"learning_asset change [{topic_id}] — cleared {cleared_scenes} exit ticket scene objects")
+        except Exception:
+            pass
         logger.info(f"Replace learning_asset [{topic_id}] — cleared {cleared} stale segment objects")
 
     if output_type in ARRAY_COLUMNS:
@@ -495,6 +500,11 @@ async def delete_admin_output(
         try:
             delete_from_r2(f"{topic_id}/quiz.json")
             logger.info(f"Delete learning_asset [{topic_id}] — cleared stale quiz.json")
+        except Exception:
+            pass
+        try:
+            cleared_scenes = delete_r2_prefix(f"{topic_id}/exit_ticket/")
+            logger.info(f"learning_asset change [{topic_id}] — cleared {cleared_scenes} exit ticket scene objects")
         except Exception:
             pass
         logger.info(f"Delete learning_asset [{topic_id}] — removed asset file and {cleared} stale segment objects from R2")
@@ -682,6 +692,7 @@ DOWNSTREAM_MAP = {
         "visual_overview_images",
         "narration_audio",
         "quiz",
+        "exit_ticket_scenes",
     ],
     "podcast_script": [
         "podcast_script",
@@ -933,6 +944,26 @@ async def generate_downstream(
                 except Exception as e:
                     generation_runs.update_step(run_id, "quiz", "failed", str(e))
                     logger.error(f"generate-from [{topic_id}] — quiz failed: {e}")
+
+            # ── EXIT TICKET SCENES ───────────────────────────────
+            if "exit_ticket_scenes" in steps:
+                generation_runs.update_step(run_id, "exit_ticket_scenes", "running")
+                try:
+                    from app.services.generators.exit_ticket_scene import generate_exit_ticket_scenes
+                    fw = None
+                    if course_id:
+                        course_res = bg_sb.table("courses").select("framework_type").eq("id", course_id).execute()
+                        if course_res.data:
+                            fw = course_res.data[0].get("framework_type")
+                    result = await generate_exit_ticket_scenes(
+                        topic_id, bg_sb,
+                        framework_type=fw, student_id=student_id, course_id=course_id,
+                    )
+                    generation_runs.update_step(run_id, "exit_ticket_scenes", "done")
+                    logger.info(f"generate-from [{topic_id}] — exit_ticket_scenes completed ({result['scenes']}/{result['clusters']})")
+                except Exception as e:
+                    generation_runs.update_step(run_id, "exit_ticket_scenes", "failed", str(e))
+                    logger.error(f"generate-from [{topic_id}] — exit_ticket_scenes failed: {e}")
 
         finally:
             final = generation_runs.finish_run(run_id)
