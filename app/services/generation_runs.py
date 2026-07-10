@@ -16,8 +16,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+STALE_RUN_MINUTES = 120
+
+
 def get_active_run(topic_id: str) -> dict | None:
-    """Return the most recent still-running run for a topic, or None."""
+    """
+    Return the most recent still-running run for a topic, or None.
+    Runs with no update for STALE_RUN_MINUTES are considered orphaned
+    (process died mid-run) and are auto-closed so they can't block new runs.
+    """
     sb = get_supabase()
     result = (
         sb.table("generation_runs")
@@ -28,7 +35,23 @@ def get_active_run(topic_id: str) -> dict | None:
         .limit(1)
         .execute()
     )
-    return result.data[0] if result.data else None
+    if not result.data:
+        return None
+    run = result.data[0]
+    stamp = run.get("updated_at") or run.get("created_at")
+    try:
+        last = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        age_min = (datetime.now(timezone.utc) - last).total_seconds() / 60
+        if age_min > STALE_RUN_MINUTES:
+            logger.warning(
+                f"generation_runs [{topic_id}] — run {run['id']} stale "
+                f"({age_min:.0f} min since last update); auto-closing"
+            )
+            finish_run(run["id"])
+            return None
+    except Exception as e:
+        logger.warning(f"generation_runs [{topic_id}] — staleness check failed: {e}")
+    return run
 
 
 def get_latest_run(topic_id: str) -> dict | None:

@@ -4,6 +4,7 @@ Uses Claude Sonnet to generate multiple-choice questions from the learning asset
 Caches results on R2.
 """
 
+import asyncio
 import json
 import logging
 import anthropic
@@ -18,7 +19,7 @@ MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8000
 
 
-async def generate_quiz(topic_id: str, supabase_client, framework_type: str = None, student_id: str = None, course_id: str = None) -> list[dict]:
+async def generate_quiz(topic_id: str, supabase_client, framework_type: str = None, student_id: str = None, course_id: str = None, force_regenerate: bool = False) -> list[dict]:
     """
     Generate quiz questions from the learning asset.
     Checks R2 for cached quiz first. If not found, generates and caches.
@@ -26,8 +27,10 @@ async def generate_quiz(topic_id: str, supabase_client, framework_type: str = No
     """
     r2_key = f"{topic_id}/quiz.json"
 
-    # Check for cached quiz
+    # Check for cached quiz (skipped when force_regenerate)
     try:
+        if force_regenerate:
+            raise KeyError("force_regenerate")
         cached = download_from_r2(r2_key).decode("utf-8")
         clean = cached.strip()
         if clean.startswith("```"):
@@ -68,19 +71,24 @@ async def generate_quiz(topic_id: str, supabase_client, framework_type: str = No
     else:
         prompt = f"{base_prompt}\n\n---\n\nLEARNING ASSET:\n\n{learning_asset}"
 
-    # Call Sonnet with streaming to avoid timeout
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-    raw = ""
-    with client.messages.stream(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{
-            "role": "user",
-            "content": prompt
-        }]
-    ) as stream:
-        for text in stream.text_stream:
-            raw += text
+    # Call Sonnet with streaming to avoid timeout; run in a thread so the
+    # synchronous stream doesn't block the event loop
+    def _stream_sync() -> str:
+        client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        out = ""
+        with client.messages.stream(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        ) as stream:
+            for text in stream.text_stream:
+                out += text
+        return out
+
+    raw = await asyncio.to_thread(_stream_sync)
 
     logger.info(f"Quiz [{topic_id}] — Sonnet returned {len(raw)} chars")
 

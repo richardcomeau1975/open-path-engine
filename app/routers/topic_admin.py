@@ -426,6 +426,11 @@ async def upload_admin_output(
 
     if output_type == "learning_asset":
         cleared = delete_r2_prefix(f"{topic_id}/segments/")
+        try:
+            delete_from_r2(f"{topic_id}/quiz.json")
+            logger.info(f"Replace learning_asset [{topic_id}] — cleared stale quiz.json")
+        except Exception:
+            pass
         logger.info(f"Replace learning_asset [{topic_id}] — cleared {cleared} stale segment objects")
 
     if output_type in ARRAY_COLUMNS:
@@ -487,6 +492,11 @@ async def delete_admin_output(
         if asset_key:
             delete_from_r2(asset_key)
         cleared = delete_r2_prefix(f"{topic_id}/segments/")
+        try:
+            delete_from_r2(f"{topic_id}/quiz.json")
+            logger.info(f"Delete learning_asset [{topic_id}] — cleared stale quiz.json")
+        except Exception:
+            pass
         logger.info(f"Delete learning_asset [{topic_id}] — removed asset file and {cleared} stale segment objects from R2")
 
     if output_type in ARRAY_COLUMNS:
@@ -671,6 +681,7 @@ DOWNSTREAM_MAP = {
         "visual_overview_script",
         "visual_overview_images",
         "narration_audio",
+        "quiz",
     ],
     "podcast_script": [
         "podcast_script",
@@ -901,6 +912,27 @@ async def generate_downstream(
                     except Exception as e:
                         generation_runs.update_step(run_id, "narration_audio", "failed", str(e))
                         logger.error(f"generate-from [{topic_id}] — narration_audio failed: {e}")
+
+            # ── QUIZ (regenerated fresh so it always matches the current asset) ──
+            if "quiz" in steps:
+                generation_runs.update_step(run_id, "quiz", "running")
+                try:
+                    from app.services.generators.quiz import generate_quiz
+                    fw = None
+                    if course_id:
+                        course_res = bg_sb.table("courses").select("framework_type").eq("id", course_id).execute()
+                        if course_res.data:
+                            fw = course_res.data[0].get("framework_type")
+                    questions = await generate_quiz(
+                        topic_id, bg_sb,
+                        framework_type=fw, student_id=student_id, course_id=course_id,
+                        force_regenerate=True,
+                    )
+                    generation_runs.update_step(run_id, "quiz", "done")
+                    logger.info(f"generate-from [{topic_id}] — quiz completed ({len(questions)} questions)")
+                except Exception as e:
+                    generation_runs.update_step(run_id, "quiz", "failed", str(e))
+                    logger.error(f"generate-from [{topic_id}] — quiz failed: {e}")
 
         finally:
             final = generation_runs.finish_run(run_id)
