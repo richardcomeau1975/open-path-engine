@@ -42,7 +42,7 @@ VOICE_PRESETS = {
         {"speakerAlias": "HOST", "speakerId": "Zephyr"},
     ],
 }
-DEFAULT_VOICE_PRESET = "standard"
+DEFAULT_VOICE_PRESET = "classic"
 
 
 def _resolve_voice_configs(topic_id: str) -> list:
