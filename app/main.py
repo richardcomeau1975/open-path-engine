@@ -20,6 +20,7 @@ from app.routers.exit_ticket import router as exit_ticket_router
 from app.routers.settlement import router as settlement_router
 from app.routers.simulation import router as simulation_router
 from app.routers.migrateezy import router as migrateezy_router
+from app.routers.notes import router as notes_router
 
 app = FastAPI(title="Open Path Engine", version="0.1.0")
 
@@ -50,6 +51,7 @@ app.include_router(exit_ticket_router)
 app.include_router(settlement_router)
 app.include_router(simulation_router)
 app.include_router(migrateezy_router)
+app.include_router(notes_router)
 
 
 @app.get("/api/health")

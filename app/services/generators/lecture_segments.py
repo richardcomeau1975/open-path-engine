@@ -8,6 +8,18 @@ import re
 import json
 import logging
 from app.services.r2 import download_from_r2, upload_text_to_r2
+from app.services.generators.exit_ticket_scene import extract_clusters
+
+CLUSTER_TITLE_PREFIX_RE = re.compile(r'^Cluster\s+\d+\s*[:.\-—–]\s*', re.IGNORECASE)
+OUTCOME_BOLD_LEAD_RE = re.compile(r'^\s*[-*]\s+\*\*(.+?)\*\*', re.MULTILINE)
+
+
+def _cluster_display_meta(cluster: dict) -> tuple[str, list[str]]:
+    """Title = cluster heading minus the 'Cluster N:' prefix.
+    Outcomes = the bold-lead strings of the cluster's dot bullets, trailing periods stripped."""
+    title = CLUSTER_TITLE_PREFIX_RE.sub("", cluster["title"]).strip()
+    outcomes = [m.group(1).strip().rstrip(".") for m in OUTCOME_BOLD_LEAD_RE.finditer(cluster["content"])]
+    return title, outcomes
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +87,7 @@ async def split_and_store_segments(topic_id: str, supabase_client) -> dict:
     """
     # Load the lecture script
     topic = supabase_client.table("topics").select(
-        "podcast_script_url"
+        "podcast_script_url, learning_asset_url"
     ).eq("id", topic_id).execute()
 
     if not topic.data or not topic.data[0].get("podcast_script_url"):
@@ -88,6 +100,22 @@ async def split_and_store_segments(topic_id: str, supabase_client) -> dict:
     # Parse into segments
     segments = parse_lecture_segments(script_text)
     logger.info(f"Lecture segments [{topic_id}] — found {len(segments)} segments")
+
+    # Load learning asset clusters for titles/outcomes (non-fatal if unavailable)
+    clusters_by_number = {}
+    learning_asset_url = topic.data[0].get("learning_asset_url")
+    if learning_asset_url:
+        try:
+            asset_text = download_from_r2(learning_asset_url).decode("utf-8")
+            clusters = extract_clusters(asset_text)
+            clusters_by_number = {c["number"]: c for c in clusters}
+            if len(clusters) != len(segments):
+                logger.warning(
+                    f"Lecture segments [{topic_id}] — segment count ({len(segments)}) != "
+                    f"cluster count ({len(clusters)}); titles/outcomes filled where they map"
+                )
+        except Exception as e:
+            logger.warning(f"Lecture segments [{topic_id}] — could not load clusters for titles/outcomes: {e}")
 
     # Store each segment's script
     manifest = {
@@ -103,7 +131,7 @@ async def split_and_store_segments(topic_id: str, supabase_client) -> dict:
         script_key = f"{topic_id}/lecture/segment_{seg_num}.md"
         upload_text_to_r2(script_key, seg["script"])
 
-        manifest["segments"].append({
+        entry = {
             "number": seg_num,
             "image_prompt": seg["image_prompt"],
             "anchors": seg["anchors"],
@@ -111,7 +139,13 @@ async def split_and_store_segments(topic_id: str, supabase_client) -> dict:
             "audio_url": None,  # filled by audio generator
             "image_url": None,  # filled by image generator
             "timestamps_url": None,  # filled by audio generator
-        })
+        }
+        cluster = clusters_by_number.get(seg_num)
+        if cluster:
+            title, outcomes = _cluster_display_meta(cluster)
+            entry["title"] = title
+            entry["outcomes"] = outcomes
+        manifest["segments"].append(entry)
 
         logger.info(f"Lecture segments [{topic_id}] — stored segment {seg_num} script ({len(seg['script'])} chars)")
 
